@@ -19,6 +19,7 @@ import type {
   WindowsProviderRuntimeOptions,
   WindowsProviderRuntimeResult,
 } from "@cafecode/shared/windowsProviderRuntime";
+import { WindowsProviderRuntimeError } from "@cafecode/shared/windowsProviderRuntime";
 
 import { deriveServerPaths, ensureServerDirectories, type ServerConfigShape } from "../config.ts";
 import { ensureProviderSupervisorProcess } from "./ProviderSupervisorProcessManager.ts";
@@ -236,6 +237,8 @@ describe("ProviderSupervisorProcessManager", () => {
       assert.equal(supervisor.snapshot.health.protocolVersion, 1);
       assert.equal(supervisor.snapshot.health.activeSessionCount, 2);
       assert.equal(supervisor.snapshot.health.configuredInstanceCount, 3);
+      assert.isFalse("windowsProcessIdentity" in supervisor.snapshot);
+      assert.isFalse("windowsOwnershipId" in supervisor.snapshot);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
@@ -289,6 +292,23 @@ describe("ProviderSupervisorProcessManager", () => {
             yield* fileSystem.readFileString(credentialPath),
             "retained synthetic credential",
           );
+        }
+        const legacyError = new WindowsProviderRuntimeError("legacy-identity-unknown");
+        legacyError.message = "private mutated exception details";
+        const legacyOutcome = yield* ensureProviderSupervisorProcess(
+          { config, version: "0.0.0-test" },
+          {
+            platform: "win32",
+            createWindowsRuntime: () =>
+              fakeWindowsRuntime(async () => {
+                throw legacyError;
+              }),
+          },
+        ).pipe(Effect.result);
+        assert.equal(legacyOutcome._tag, "Failure");
+        if (legacyOutcome._tag === "Failure") {
+          assert.include(legacyOutcome.failure.message, "guided legacy recovery");
+          assert.notInclude(legacyOutcome.failure.message, "private mutated");
         }
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
@@ -370,11 +390,17 @@ describe("ProviderSupervisorProcessManager", () => {
         );
         assert.equal(supervisor.snapshot.pid, 27);
         assert.equal(supervisor.snapshot.adoptedExistingProcess, true);
+        assert.deepEqual(supervisor.snapshot.windowsProcessIdentity, health.windowsProcessIdentity);
+        assert.equal(supervisor.snapshot.windowsOwnershipId, TEST_WINDOWS_OWNERSHIP_ID);
         assert.equal(supervisor.snapshot.credentialPath, result.marker.credentialPath);
         assert.equal(supervisor.endpoint, endpoint);
         assert.equal(spawnCalls, 0);
         assert.ok(configured);
         assert.equal(configured.role, "provider-supervisor");
+        // Windows must retain shared absolute deadlines/byte limits instead of
+        // overriding them with the legacy POSIX idle-timeout HTTP helpers.
+        assert.isUndefined(configured.fetchHealth);
+        assert.isUndefined(configured.issueLease);
         assert.equal(configured.markerPath, path.join(config.stateDir, "provider-supervisor.json"));
         assert.equal(
           configured.legacyCredentialPath,

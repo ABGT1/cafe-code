@@ -99,6 +99,8 @@ export interface WindowsOwnershipDependencies {
   readonly operationTimeoutMs?: number;
   readonly sessionTimeoutMs?: number;
   readonly helperExitTimeoutMs?: number;
+  /** Fixed startup phases only; never raw helper output or caller data. */
+  readonly onStartupPhase?: (phase: "bootstrap" | "source" | "ready") => void;
 }
 
 type JsonObject = Record<string, unknown>;
@@ -242,7 +244,7 @@ function helperTransport(dependencies: WindowsOwnershipDependencies): HelperTran
   // the loaded script replaces Console's buffered reader and can discard the
   // already-prefetched first JSON request, leaving native startup waiting forever.
   const bootstrap =
-    "[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false); & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadLine()))))";
+    '$ErrorActionPreference = "Stop"; try { [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false); [Console]::Out.WriteLine(\'{"id":0,"ok":true,"phase":"bootstrap"}\'); [Console]::Out.Flush(); & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadLine())))) } catch { [Console]::Out.WriteLine(\'{"id":0,"ok":false,"reason":"helper-unavailable"}\'); [Console]::Out.Flush() }';
   const args = [
     "-NoLogo",
     "-NoProfile",
@@ -276,12 +278,14 @@ function helperTransport(dependencies: WindowsOwnershipDependencies): HelperTran
         resolve: (value: unknown) => void;
         reject: (error: WindowsOwnershipError) => void;
         timer: ReturnType<typeof setTimeout>;
+        encoded: string;
       }
     | undefined;
   let closed = false;
   let exited = false;
   const exitWaiters = new Set<() => void>();
   let sequence = 0;
+  let startupPhase = 0;
   let buffered = "";
   let queued: Promise<unknown> = Promise.resolve();
   const abort = (reason: WindowsOwnershipReason): void => {
@@ -304,6 +308,12 @@ function helperTransport(dependencies: WindowsOwnershipDependencies): HelperTran
     dependencies.sessionTimeoutMs ?? WINDOWS_OWNERSHIP_LIMITS.sessionTimeoutMs,
   );
   lifetime.unref();
+  const sendPending = (): void => {
+    if (pending === undefined || startupPhase !== 3 || closed) return;
+    child.stdin.write(pending.encoded, (error) => {
+      if (error !== null && error !== undefined) abort("helper-exited");
+    });
+  };
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
     if (closed) return;
@@ -312,29 +322,48 @@ function helperTransport(dependencies: WindowsOwnershipDependencies): HelperTran
       abort("invalid-response");
       return;
     }
-    const newline = buffered.indexOf("\n");
-    if (newline === -1) return;
-    const line = buffered.slice(0, newline);
-    buffered = buffered.slice(newline + 1);
     try {
-      const response = object(JSON.parse(line));
-      const current = pending;
-      if (response.id === 0 && response.ok === false && response.reason === "helper-unavailable") {
-        abort("helper-unavailable");
-        return;
+      while (buffered.includes("\n")) {
+        const newline = buffered.indexOf("\n");
+        const line = buffered.slice(0, newline);
+        buffered = buffered.slice(newline + 1);
+        const response = object(JSON.parse(line));
+        const current = pending;
+        if (
+          response.id === 0 &&
+          response.ok === false &&
+          response.reason === "helper-unavailable"
+        ) {
+          abort("helper-unavailable");
+          return;
+        }
+        // The source and JSON protocol share stdin, so do not send any request
+        // until the compiled helper owns its final reader. PowerShell may replace
+        // buffered readers while initializing; startup phases are fixed data and
+        // never allow replay or extend the operation's original deadline.
+        if (response.id === 0 && response.ok === true) {
+          const expected = ["bootstrap", "source", "ready"] as const;
+          const phase = expected[startupPhase];
+          if (phase === undefined || response.phase !== phase)
+            throw new WindowsOwnershipError("invalid-response");
+          startupPhase++;
+          dependencies.onStartupPhase?.(phase);
+          if (startupPhase === 3) sendPending();
+          continue;
+        }
+        if (current === undefined || response.id !== current.id || buffered.length > 0) {
+          throw new WindowsOwnershipError("invalid-response");
+        }
+        if (response.ok !== true && response.ok !== false)
+          throw new WindowsOwnershipError("invalid-response");
+        const reason = response.ok === false ? optionalReason(response.reason) : undefined;
+        if (response.ok === false && reason === undefined)
+          throw new WindowsOwnershipError("invalid-response");
+        pending = undefined;
+        clearTimeout(current.timer);
+        if (response.ok === true) current.resolve(response.result);
+        else current.reject(new WindowsOwnershipError(reason!));
       }
-      if (current === undefined || response.id !== current.id || buffered.length > 0) {
-        throw new WindowsOwnershipError("invalid-response");
-      }
-      if (response.ok !== true && response.ok !== false)
-        throw new WindowsOwnershipError("invalid-response");
-      const reason = response.ok === false ? optionalReason(response.reason) : undefined;
-      if (response.ok === false && reason === undefined)
-        throw new WindowsOwnershipError("invalid-response");
-      pending = undefined;
-      clearTimeout(current.timer);
-      if (response.ok === true) current.resolve(response.result);
-      else current.reject(new WindowsOwnershipError(reason!));
     } catch {
       abort("invalid-response");
     }
@@ -374,10 +403,8 @@ function helperTransport(dependencies: WindowsOwnershipDependencies): HelperTran
               () => abort("helper-timeout"),
               dependencies.operationTimeoutMs ?? WINDOWS_OWNERSHIP_LIMITS.operationTimeoutMs,
             );
-            pending = { id, resolve, reject, timer };
-            child.stdin.write(encoded, (error) => {
-              if (error !== null && error !== undefined) abort("helper-exited");
-            });
+            pending = { id, resolve, reject, timer, encoded };
+            sendPending();
           }),
       );
       // One outstanding operation per guard. A failed mutation is never replayed
@@ -507,15 +534,26 @@ export async function openWindowsOwnershipSession(
       return (await processRequest(transport, "terminate", identity)) as WindowsProcessTermination;
     },
     async close() {
+      let closeFailure: unknown;
       try {
         await transport.request({ op: "close" });
-      } finally {
-        transport.close();
-        // Never transfer authority to a different ownership guard solely from
-        // an ACK or a dispatched kill request. A bounded failure is uncertainty
-        // and must prevent that caller from continuing its cross-role action.
-        await transport.waitForExit();
+      } catch (error) {
+        closeFailure = error;
       }
+      transport.close();
+      // Never transfer authority to a different ownership guard solely from
+      // an ACK or a dispatched kill request. A bounded failure is uncertainty
+      // and must prevent that caller from continuing its cross-role action.
+      await transport.waitForExit();
+      // Node can report exit before stdout delivers the final close ACK. Close
+      // has no file mutation to replay: actual exit already proves guard release.
+      // Do not similarly promote malformed replies or an operation timeout.
+      if (
+        closeFailure instanceof WindowsOwnershipError &&
+        (closeFailure.reason === "helper-exited" || closeFailure.reason === "session-closed")
+      )
+        return;
+      if (closeFailure !== undefined) throw closeFailure;
     },
   };
 }

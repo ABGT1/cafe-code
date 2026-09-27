@@ -61,6 +61,84 @@ function daemonSnapshot(): DesktopProviderDaemonSnapshot {
   };
 }
 
+/**
+ * The first fenced recovery has definitely retired the old owner, but its new
+ * child is not admitted yet. There is deliberately no active PID to observe.
+ * Only another guarded ensure can reconcile the prepared replacement.
+ */
+function pendingWindowsRecoveryFixture(input?: {
+  readonly healthyWhilePending?: boolean;
+  readonly ensure?: () => Effect.Effect<ProviderDaemonClientConfig>;
+}) {
+  const actions: string[] = [];
+  let retired = false;
+  let probes = 0;
+  let observations = 0;
+  let ensureAttempts = 0;
+  const providerDaemonManager: DesktopProviderDaemonManagerShape = {
+    ensureRunning: Effect.suspend(() => {
+      actions.push("ensure-prepared-owner");
+      ensureAttempts += 1;
+      if (input?.ensure) return input.ensure();
+      // One infrastructure failure exercises the retry cooldown. No old
+      // termination or original user input is replayed during either retry.
+      return ensureAttempts === 1
+        ? Effect.die(new Error("Prepared ownership observation unavailable"))
+        : Effect.succeed(endpoint);
+    }),
+    recover: (_reason, expected) =>
+      Effect.suspend(() => {
+        assert.equal(expected, "retired-generation");
+        assert.equal(retired, false, "the old recovery must never run twice");
+        actions.push("recover-and-retire-owner");
+        retired = true;
+        return Effect.die(new Error("Replacement is prepared but not ready"));
+      }),
+    currentConfig: Effect.succeed(Option.none()),
+    probeLiveness: Effect.sync(() => {
+      probes += 1;
+      return retired && input?.healthyWhilePending ? Option.some(liveDaemon) : Option.none();
+    }),
+    observeProcessOwnership: Effect.sync(() => {
+      observations += 1;
+      return retired
+        ? { status: "unknown" as const }
+        : { status: "exited" as const, ownershipId: "retired-generation" };
+    }),
+    refreshHealth: Effect.succeed(Option.none()),
+    snapshot: Effect.sync(() =>
+      retired
+        ? { ...daemonSnapshot(), status: "error" as const, pid: Option.none() }
+        : daemonSnapshot(),
+    ),
+    stop: Effect.die("pending recovery cannot use an unfenced stop"),
+  };
+  const backendManager: DesktopBackendManagerShape = {
+    start: Effect.sync(() => {
+      actions.push("start-backend");
+    }),
+    stop: () =>
+      Effect.sync(() => {
+        actions.push("stop-backend");
+      }),
+    currentConfig: Effect.succeed(Option.none()),
+    snapshot: Effect.succeed({
+      desiredRunning: true,
+      ready: false,
+      activePid: Option.none(),
+      restartAttempt: 0,
+      restartScheduled: false,
+    }),
+  };
+  return {
+    actions,
+    providerDaemonManager,
+    backendManager,
+    probes: () => probes,
+    observations: () => observations,
+  };
+}
+
 describe("DesktopApp provider daemon bootstrap credentials", () => {
   it.effect(
     "starts the backend only with the final lease after a failed provisional daemon attempt",
@@ -151,6 +229,115 @@ describe("DesktopApp provider daemon bootstrap credentials", () => {
 });
 
 describe("DesktopApp provider daemon watchdog", () => {
+  for (const healthyWhilePending of [false, true]) {
+    it.effect(
+      `reconciles pending Windows replacement without repeating old recovery (healthy probe=${healthyWhilePending})`,
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const quitting = yield* Ref.make(false);
+            const fixture = pendingWindowsRecoveryFixture({ healthyWhilePending });
+            const watchdog = yield* runProviderDaemonHealthWatchdog({
+              ...fixture,
+              quitting,
+              checkInterval: Duration.millis(1),
+              isDaemonProcessAlive: () => {
+                throw new Error("Windows retries must not use PID-only observations");
+              },
+            }).pipe(Effect.forkScoped);
+            yield* Effect.yieldNow;
+            yield* TestClock.adjust(Duration.millis(1));
+            yield* Effect.yieldNow;
+            assert.deepStrictEqual(fixture.actions, ["stop-backend", "recover-and-retire-owner"]);
+
+            yield* TestClock.adjust(Duration.millis(1));
+            yield* Effect.yieldNow;
+            assert.deepStrictEqual(fixture.actions, [
+              "stop-backend",
+              "recover-and-retire-owner",
+              "ensure-prepared-owner",
+            ]);
+            // The failed retry earns one complete cooldown tick. Even an
+            // already healthy replacement cannot bypass the missing lease and
+            // make the watchdog forget that the backend is still stopped.
+            yield* TestClock.adjust(Duration.millis(1));
+            yield* Effect.yieldNow;
+            assert.equal(fixture.actions.length, 3);
+            yield* TestClock.adjust(Duration.millis(1));
+            yield* Effect.yieldNow;
+            assert.deepStrictEqual(fixture.actions, [
+              "stop-backend",
+              "recover-and-retire-owner",
+              "ensure-prepared-owner",
+              "ensure-prepared-owner",
+              "start-backend",
+            ]);
+            assert.equal(fixture.probes(), 1);
+            assert.equal(fixture.observations(), 1);
+            yield* Fiber.interrupt(watchdog);
+          }).pipe(Effect.provide(TestClock.layer())),
+        ),
+    );
+  }
+
+  it.effect("does not retry pending Windows ownership recovery after quit", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const quitting = yield* Ref.make(false);
+        const fixture = pendingWindowsRecoveryFixture();
+        const watchdog = yield* runProviderDaemonHealthWatchdog({
+          ...fixture,
+          quitting,
+          checkInterval: Duration.millis(1),
+        }).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust(Duration.millis(1));
+        yield* Effect.yieldNow;
+        yield* Ref.set(quitting, true);
+        yield* TestClock.adjust(Duration.millis(10));
+        yield* Fiber.join(watchdog);
+        assert.deepStrictEqual(fixture.actions, ["stop-backend", "recover-and-retire-owner"]);
+        assert.equal(fixture.probes(), 1);
+      }).pipe(Effect.provide(TestClock.layer())),
+    ),
+  );
+
+  it.effect("does not restart the backend when quit arrives during pending Windows admission", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const quitting = yield* Ref.make(false);
+        const admitted = yield* Deferred.make<ProviderDaemonClientConfig>();
+        const admissionStarted = yield* Deferred.make<void>();
+        const fixture = pendingWindowsRecoveryFixture({
+          healthyWhilePending: true,
+          ensure: () =>
+            Deferred.succeed(admissionStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(admitted)),
+            ),
+        });
+        const watchdog = yield* runProviderDaemonHealthWatchdog({
+          ...fixture,
+          quitting,
+          checkInterval: Duration.millis(1),
+        }).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust(Duration.millis(1));
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust(Duration.millis(1));
+        yield* Deferred.await(admissionStarted);
+        yield* Ref.set(quitting, true);
+        yield* Deferred.succeed(admitted, endpoint);
+        yield* Fiber.join(watchdog);
+        assert.deepStrictEqual(fixture.actions, [
+          "stop-backend",
+          "recover-and-retire-owner",
+          "ensure-prepared-owner",
+        ]);
+        assert.equal(fixture.probes(), 1);
+      }).pipe(Effect.provide(TestClock.layer())),
+    ),
+  );
+
   for (const status of ["same-process", "unknown", "different-process", "exited"] as const) {
     it.effect(
       `uses Windows ownership authority for ${status} without consulting PID existence`,

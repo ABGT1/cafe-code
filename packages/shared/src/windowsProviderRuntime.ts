@@ -17,6 +17,8 @@ import { requestProviderDaemonJson } from "./providerDaemonHttp.ts";
 import {
   openWindowsOwnershipSession,
   windowsOwnershipCredentialPath,
+  WindowsOwnershipError,
+  type WindowsOwnershipReason,
   type WindowsOwnershipSession,
   type WindowsOwnershipSnapshot,
   type WindowsProcessIdentity,
@@ -41,14 +43,16 @@ export type WindowsProviderRuntimeFailure =
 
 export class WindowsProviderRuntimeError extends Error {
   readonly reason: WindowsProviderRuntimeFailure;
-  constructor(reason: WindowsProviderRuntimeFailure) {
+  readonly nativeReason?: WindowsOwnershipReason;
+  constructor(reason: WindowsProviderRuntimeFailure, nativeReason?: WindowsOwnershipReason) {
     super(
       reason === "legacy-identity-unknown"
         ? "Existing Windows runtime has no verified process identity. Its ownership was preserved; retry connection or use guided legacy recovery."
-        : `Windows runtime ownership is inconclusive (${reason}); existing processes and recovery evidence were preserved. Retry connection.`,
+        : `Windows runtime ownership is inconclusive (${reason}${nativeReason === undefined ? "" : `: ${nativeReason}`}); existing processes and recovery evidence were preserved. Retry connection.`,
     );
     this.name = "WindowsProviderRuntimeError";
     this.reason = reason;
+    if (nativeReason !== undefined) this.nativeReason = nativeReason;
   }
 }
 
@@ -97,6 +101,11 @@ export interface WindowsProviderRuntimeOptions {
     endpoint: ProviderDaemonClientConfig,
   ) => Promise<ProviderDaemonLeaseResponse>;
   readonly openSession?: typeof openWindowsOwnershipSession;
+  /** Called only after releasing this role's guard; independently verifies the other role. */
+  readonly stopSupervisor?: (owner: {
+    readonly ownershipId: string;
+    readonly identity: WindowsProcessIdentity;
+  }) => Promise<void>;
   /** Tests inject time; production deadlines remain bounded, without inference retries. */
   readonly now?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
@@ -106,7 +115,10 @@ export interface WindowsProviderRuntimeOptions {
 export interface WindowsProviderRuntime {
   readonly ensure: () => Promise<WindowsProviderRuntimeResult>;
   readonly observe: () => Promise<WindowsProviderRuntimeObservation>;
-  readonly stop: (expectedOwnershipId?: string) => Promise<void>;
+  readonly stop: (
+    expectedOwnershipId?: string,
+    expectedIdentity?: WindowsProcessIdentity,
+  ) => Promise<void>;
   readonly recover: (expectedOwnershipId?: string) => Promise<WindowsProviderRuntimeResult>;
   readonly current: () => WindowsProviderRuntimeResult | null;
 }
@@ -164,8 +176,11 @@ export async function spawnWindowsProviderRuntimeChild(options: {
   return { pid: child.pid, hasExited: () => exited };
 }
 
-const fail = (reason: WindowsProviderRuntimeFailure): never => {
-  throw new WindowsProviderRuntimeError(reason);
+const fail = (reason: WindowsProviderRuntimeFailure, nativeError?: unknown): never => {
+  throw new WindowsProviderRuntimeError(
+    reason,
+    nativeError instanceof WindowsOwnershipError ? nativeError.reason : undefined,
+  );
 };
 const sameIdentity = (a: WindowsProcessIdentity, b: WindowsProcessIdentity): boolean =>
   a.pid === b.pid && a.creationTime100ns === b.creationTime100ns;
@@ -176,6 +191,7 @@ const decodeLease = Schema.decodeUnknownSync(ProviderDaemonLeaseResponse);
 async function readHealth(endpoint: ProviderDaemonClientConfig): Promise<ProviderDaemonHealth> {
   const response = await requestProviderDaemonJson(endpoint, PROVIDER_DAEMON_HEALTH_PATH, {
     timeoutMs: 3_000,
+    signal: AbortSignal.timeout(3_000),
     maxResponseBytes: 1_048_576,
   });
   if (response.statusCode !== 200) return fail("endpoint-unavailable");
@@ -187,6 +203,7 @@ function defaultLease(role: ProviderRuntimeProcessMode) {
     const response = await requestProviderDaemonJson(endpoint, PROVIDER_DAEMON_LEASES_PATH, {
       method: "POST",
       timeoutMs: 3_000,
+      signal: AbortSignal.timeout(3_000),
       maxResponseBytes: 8_192,
       body: JSON.stringify({
         clientKind: role === "provider-daemon" ? "desktop-main" : "provider-daemon",
@@ -202,6 +219,21 @@ interface RecordSnapshot {
   readonly marker: ProviderDaemonMarker;
   readonly revision: string;
   readonly credentialBase64?: string;
+}
+
+const fence = (record: RecordSnapshot) => record.marker.windowsOwnershipId ?? record.revision;
+
+/** Private control flow, never surfaced as a provider/startup diagnostic. */
+class StopSupervisorBeforeMutation extends Error {
+  readonly revision: string;
+  readonly ownershipId: string;
+  readonly identity: WindowsProcessIdentity;
+  constructor(revision: string, ownershipId: string, identity: WindowsProcessIdentity) {
+    super("Independent supervisor ownership must be stopped first.");
+    this.revision = revision;
+    this.ownershipId = ownershipId;
+    this.identity = identity;
+  }
 }
 
 /**
@@ -221,6 +253,7 @@ export function createWindowsProviderRuntime(
   let active: { readonly result: WindowsProviderRuntimeResult; readonly revision: string } | null =
     null;
   let tail = Promise.resolve();
+  let supervisorStopPermit: StopSupervisorBeforeMutation | undefined;
 
   // One controller cannot overlap stop/adopt/recover. The helper's OS guard is
   // still required because another Electron/backend process has its own queue.
@@ -235,25 +268,59 @@ export function createWindowsProviderRuntime(
   const sessionOperation = async <A>(
     operation: (session: WindowsOwnershipSession) => Promise<A>,
   ) => {
-    let session: WindowsOwnershipSession;
     try {
-      session = await open({
-        markerPath: options.markerPath,
-        legacyCredentialPath: options.legacyCredentialPath,
-        role: options.role,
-      });
-    } catch {
-      return fail("ownership-unavailable");
-    }
-    try {
-      return await operation(session);
-    } catch (error) {
-      if (error instanceof WindowsProviderRuntimeError) throw error;
-      return fail("ownership-unavailable");
+      // At most one cross-role handoff per operation. Each marker revision is
+      // rechecked after the other role completes; no pair of ownership guards
+      // is held concurrently, and newer publications abort the old decision.
+      for (let transaction = 0; transaction < 2; transaction += 1) {
+        let session: WindowsOwnershipSession;
+        try {
+          session = await open({
+            markerPath: options.markerPath,
+            legacyCredentialPath: options.legacyCredentialPath,
+            role: options.role,
+          });
+        } catch (error) {
+          return fail("ownership-unavailable", error);
+        }
+        let requestedStop: StopSupervisorBeforeMutation | undefined;
+        let released = false;
+        try {
+          if (supervisorStopPermit) {
+            const latest = await session.read();
+            if (latest.revision !== supervisorStopPermit.revision) return fail("ownership-changed");
+          }
+          return await operation(session);
+        } catch (error) {
+          if (error instanceof StopSupervisorBeforeMutation) requestedStop = error;
+          else if (error instanceof WindowsProviderRuntimeError) throw error;
+          else return fail("ownership-unavailable", error);
+        } finally {
+          // close() confirms helper exit/guard release. If that observation is
+          // uncertain we must not acquire the other role's guard concurrently.
+          try {
+            await session.close();
+            released = true;
+          } catch {
+            /* Preserve original failure. */
+          }
+        }
+        if (!released || !requestedStop || !options.stopSupervisor || transaction !== 0) {
+          return fail("upstream-ownership-unknown");
+        }
+        try {
+          await options.stopSupervisor({
+            ownershipId: requestedStop.ownershipId,
+            identity: requestedStop.identity,
+          });
+        } catch {
+          return fail("upstream-ownership-unknown");
+        }
+        supervisorStopPermit = requestedStop;
+      }
+      return fail("upstream-ownership-unknown");
     } finally {
-      // A dead helper has already released its native guard. Its loss must not
-      // conceal the operation's original sanitized failure or trigger a replay.
-      await session.close().catch(() => {});
+      supervisorStopPermit = undefined;
     }
   };
   const recordFrom = (snapshot: WindowsOwnershipSnapshot): RecordSnapshot | null => {
@@ -300,7 +367,6 @@ export function createWindowsProviderRuntime(
     };
   };
   const read = async (session: WindowsOwnershipSession) => recordFrom(await session.read());
-  const fence = (record: RecordSnapshot) => record.marker.windowsOwnershipId ?? record.revision;
   const checkExpected = (record: RecordSnapshot | null, expected: string | undefined) => {
     if (expected !== undefined && (record === null || fence(record) !== expected)) {
       return fail("ownership-changed");
@@ -383,17 +449,17 @@ export function createWindowsProviderRuntime(
             : { credentialBase64: record.credentialBase64 }
           : { credentialBase64 }),
       };
-    } catch {
+    } catch (error) {
       // The mutation may already have committed. Do not retry, remove or spawn;
       // the next ensure opens a new guard and re-observes the durable record.
-      return fail("mutation-uncertain");
+      return fail("mutation-uncertain", error);
     }
   };
   const retire = async (session: WindowsOwnershipSession, record: RecordSnapshot) => {
     try {
       await session.retire(record.revision);
-    } catch {
-      return fail("mutation-uncertain");
+    } catch (error) {
+      return fail("mutation-uncertain", error);
     }
     if (active && active.result.ownershipId === fence(record)) active = null;
   };
@@ -423,7 +489,7 @@ export function createWindowsProviderRuntime(
     if (outcome.status === "different-process") await staleConflictCheck(record);
     await retire(session, record);
   };
-  const requireNoUnboundUpstream = (health: ProviderDaemonHealth) => {
+  const requireNoUnboundUpstream = (record: RecordSnapshot, health: ProviderDaemonHealth) => {
     // A daemon's authenticated health does not grant authority over a separate
     // supervisor PID. Automatic supervisor handoff remains disabled. If an
     // explicitly configured legacy topology is still present, preserve it
@@ -432,7 +498,37 @@ export function createWindowsProviderRuntime(
       options.role === "provider-daemon" &&
       (health.upstreamSupervisor?.configured || health.supervisorProcess !== undefined)
     ) {
-      return fail("upstream-ownership-unknown");
+      const upstream = health.upstreamSupervisor;
+      const ownershipId = upstream?.windowsOwnershipId;
+      const identity = upstream?.windowsProcessIdentity;
+      if (supervisorStopPermit?.revision === record.revision) {
+        // The independent stop was confirmed. Its disappearance is expected,
+        // not an instruction to retry that stop. A newly reported generation,
+        // birth identity or PID is contradictory and preserves the daemon.
+        if (
+          (ownershipId !== undefined && ownershipId !== supervisorStopPermit.ownershipId) ||
+          (identity !== undefined && !sameIdentity(identity, supervisorStopPermit.identity)) ||
+          (upstream?.pid !== undefined && upstream.pid !== supervisorStopPermit.identity.pid)
+        ) {
+          return fail("endpoint-conflict");
+        }
+        if (upstream === undefined || !upstream.reachable) return;
+      }
+      if (
+        !options.stopSupervisor ||
+        !ownershipId ||
+        !identity ||
+        identity.pid !== upstream?.pid ||
+        upstream.mode !== "provider-supervisor"
+      )
+        return fail("upstream-ownership-unknown");
+      if (
+        supervisorStopPermit?.revision === record.revision &&
+        supervisorStopPermit.ownershipId === ownershipId &&
+        sameIdentity(supervisorStopPermit.identity, identity)
+      )
+        return;
+      throw new StopSupervisorBeforeMutation(record.revision, ownershipId, identity);
     }
   };
   const leaseAndAccept = async (
@@ -550,7 +646,7 @@ export function createWindowsProviderRuntime(
     }
     if (!compatible(record.marker, health)) {
       if (!allowReplacement) return fail("ownership-changed");
-      requireNoUnboundUpstream(health);
+      requireNoUnboundUpstream(record, health);
       await terminate(session, record);
       return null;
     }
@@ -647,13 +743,38 @@ export function createWindowsProviderRuntime(
     }
     return spawnFresh(session);
   };
-  const stopInSession = async (session: WindowsOwnershipSession, expected?: string) => {
+  const stopInSession = async (
+    session: WindowsOwnershipSession,
+    expected?: string,
+    expectedIdentity?: WindowsProcessIdentity,
+  ) => {
     let record = await read(session);
+    if (!record && expected !== undefined && expectedIdentity !== undefined) {
+      // A prior retirement may have committed before its reply was lost. The
+      // independently authenticated caller retains that exact generation/birth
+      // identity, so re-observe it rather than blindly replaying the mutation.
+      // An absent record alone proves nothing about the process. Only confirmed
+      // exit/reuse plus a second guarded absence permits this no-op success;
+      // there is deliberately no termination, file removal or spawn here.
+      const observed = await session.observe(expectedIdentity);
+      if (observed.status !== "exited" && observed.status !== "different-process") {
+        return fail("identity-unknown");
+      }
+      if (await read(session)) return fail("ownership-changed");
+      if (active?.result.ownershipId === expected) active = null;
+      return;
+    }
     checkExpected(record, expected);
     if (!record) {
       active = null;
       return;
     }
+    if (
+      expectedIdentity &&
+      (!record.marker.windowsProcessIdentity ||
+        !sameIdentity(expectedIdentity, record.marker.windowsProcessIdentity))
+    )
+      return fail("ownership-changed");
     const identity = record.marker.windowsProcessIdentity;
     if (identity) {
       const observed = await session.observe(identity);
@@ -674,7 +795,15 @@ export function createWindowsProviderRuntime(
       if (!record || !active || active.revision !== record.revision)
         return fail("ownership-changed");
     }
-    requireNoUnboundUpstream(active.result.health);
+    let terminationHealth = active.result.health;
+    if (supervisorStopPermit) {
+      // The other role could have changed while this role's guard was released.
+      // A cached pre-handoff supervisor summary cannot authorize the second
+      // half of the transaction; require a fresh authenticated daemon response.
+      terminationHealth = await observeHealth(active.result.rootEndpoint);
+      if (!authMatches(record, terminationHealth)) return fail("endpoint-conflict");
+    }
+    requireNoUnboundUpstream(record, terminationHealth);
     await terminate(session, record);
   };
   return {
@@ -707,8 +836,10 @@ export function createWindowsProviderRuntime(
           };
         }
       }),
-    stop: (expected) =>
-      serialize(() => sessionOperation((session) => stopInSession(session, expected))),
+    stop: (expected, expectedIdentity) =>
+      serialize(() =>
+        sessionOperation((session) => stopInSession(session, expected, expectedIdentity)),
+      ),
     recover: (expected) =>
       serialize(() =>
         sessionOperation(async (session) => {

@@ -174,6 +174,8 @@ export const ProviderDaemonUpstreamSupervisorHealth = Schema.Struct({
   protocolVersion: Schema.optional(NonNegativeInt),
   version: Schema.optional(Schema.String),
   runtimeBuildId: Schema.optional(Schema.String),
+  windowsProcessIdentity: Schema.optional(WindowsProcessIdentity),
+  windowsOwnershipId: Schema.optional(WindowsOwnershipId),
   startedAt: Schema.optional(IsoDateTime),
   activeSessionCount: Schema.optional(NonNegativeInt),
   configuredInstanceCount: Schema.optional(NonNegativeInt),
@@ -346,6 +348,8 @@ export const ProviderDaemonSupervisorProcess = Schema.Struct({
   appVersion: Schema.String,
   protocolVersion: NonNegativeInt,
   runtimeBuildId: Schema.optional(Schema.String),
+  windowsProcessIdentity: Schema.optional(WindowsProcessIdentity),
+  windowsOwnershipId: Schema.optional(WindowsOwnershipId),
   adoptedExistingProcess: Schema.Boolean,
   durationMs: Schema.Number,
 });

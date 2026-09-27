@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import { createHash } from "node:crypto";
+import * as path from "node:path";
 import {
   PROVIDER_DAEMON_HEALTH_PATH,
   PROVIDER_DAEMON_LIVENESS_PATH,
@@ -12,6 +13,8 @@ import {
   createWindowsProviderRuntime,
   spawnWindowsProviderRuntimeChild,
   WindowsProviderRuntimeError,
+  type WindowsProviderRuntime,
+  type WindowsProviderRuntimeOptions,
   type WindowsProviderRuntimeResult,
 } from "@cafecode/shared/windowsProviderRuntime";
 import * as Effect from "effect/Effect";
@@ -32,6 +35,21 @@ const unavailable =
   "Windows provider daemon ownership could not be verified; existing processes and recovery evidence were preserved. Retry connection.";
 const decodeHealth = Schema.decodeUnknownSync(ProviderDaemonHealth);
 const decodeLiveness = Schema.decodeUnknownSync(ProviderDaemonLiveness);
+
+// Never trust a response from a different owner. A migrated legacy daemon
+// cannot echo metadata it was never bootstrapped with, so retains its existing
+// authenticated PID check after initial native-identity verification.
+const matches = (
+  result: WindowsProviderRuntimeResult,
+  health: ProviderDaemonLiveness | ProviderDaemonHealth,
+) =>
+  health.pid === result.marker.pid &&
+  health.mode === "provider-daemon" &&
+  (result.marker.windowsOwnershipId === undefined ||
+    (health.windowsOwnershipId === result.marker.windowsOwnershipId &&
+      health.windowsProcessIdentity?.pid === result.marker.windowsProcessIdentity?.pid &&
+      health.windowsProcessIdentity?.creationTime100ns ===
+        result.marker.windowsProcessIdentity?.creationTime100ns));
 
 /** Injectable boundary: ordinary tests never launch PowerShell or live providers. */
 export interface WindowsDesktopProviderDaemonDependencies {
@@ -78,7 +96,9 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
   };
   const state = yield* Ref.make(initial);
   let lastHealthObservedAt: string | null = null;
-  const runtime = (dependencies.createRuntime ?? createWindowsProviderRuntime)({
+  const createRuntime = dependencies.createRuntime ?? createWindowsProviderRuntime;
+  let supervisorRuntime: WindowsProviderRuntime | undefined;
+  const runtimeOptions: WindowsProviderRuntimeOptions = {
     role: "provider-daemon",
     markerPath: environment.providerDaemonMarkerPath,
     legacyCredentialPath: environment.providerDaemonCredentialPath,
@@ -139,7 +159,43 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
         bootstrap,
       });
     },
-  });
+    stopSupervisor: async (owner) => {
+      // The detached daemon CLI always resolves its own data beneath userdata,
+      // independently of Electron's development settings directory. Do not use
+      // an upstream PID/path from health to locate or kill the other role.
+      // The shared controller releases the daemon guard before this callback
+      // and rechecks its exact revision afterward, preventing cross-role locks.
+      supervisorRuntime ??= createRuntime({
+        ...runtimeOptions,
+        role: "provider-supervisor",
+        markerPath: path.join(environment.baseDir, "userdata", "provider-supervisor.json"),
+        legacyCredentialPath: path.join(
+          environment.baseDir,
+          "userdata",
+          "secrets",
+          "provider-supervisor-token",
+        ),
+        socketPath: `\\\\.\\pipe\\cafecode-provider-supervisor-${createHash("sha256").update(environment.baseDir).digest("hex").slice(0, 24)}`,
+        cafeMcpPort: () => undefined,
+        encodeCredential: async (token) => ({
+          base64: Buffer.from(token, "utf8").toString("base64"),
+          encrypted: false,
+        }),
+        decodeCredential: async (base64, encrypted) => {
+          // Standalone supervisors never use Electron's keyring. Unexpected
+          // encryption metadata is uncertainty, not permission to rotate it.
+          if (encrypted) throw new WindowsProviderRuntimeError("credential-unavailable");
+          // The standalone supervisor persists the token as a text line.
+          // Its newline is not part of the HTTP bearer credential.
+          return Buffer.from(base64, "base64").toString("utf8").trim();
+        },
+      });
+      // stop does not spawn an absent supervisor. Both the authenticated
+      // generation and native birth identity are rechecked under its own guard.
+      await supervisorRuntime.stop(owner.ownershipId, owner.identity);
+    },
+  };
+  const runtime = createRuntime(runtimeOptions);
 
   const publish = Effect.gen(function* () {
     const current = yield* Ref.get(state);
@@ -222,26 +278,15 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
       .pipe(Effect.uninterruptible);
   const ensureRunning = lifecycle(() => runtime.ensure());
 
-  // Never trust a response that belongs to a different owner, even when a stale
-  // lease still authenticates. Legacy daemons omit metadata and retain the
-  // compatible PID check after their initial native-identity migration.
-  const matches = (
-    result: WindowsProviderRuntimeResult,
-    health: ProviderDaemonLiveness | ProviderDaemonHealth,
-  ) =>
-    health.pid === result.marker.pid &&
-    health.mode === "provider-daemon" &&
-    (result.marker.windowsOwnershipId === undefined ||
-      (health.windowsOwnershipId === result.marker.windowsOwnershipId &&
-        health.windowsProcessIdentity?.pid === result.marker.windowsProcessIdentity?.pid &&
-        health.windowsProcessIdentity?.creationTime100ns ===
-          result.marker.windowsProcessIdentity?.creationTime100ns));
   const probeLiveness = Effect.tryPromise({
     try: async () => {
       const current = runtime.current();
       if (!current) return Option.none<ProviderDaemonLiveness>();
       const response = await requestJson(current.endpoint, PROVIDER_DAEMON_LIVENESS_PATH, {
         timeoutMs: 3_000,
+        // The socket timeout is idle-based; a slowly trickling peer must not
+        // hold up the watchdog indefinitely without a complete identity reply.
+        signal: AbortSignal.timeout(3_000),
         maxResponseBytes: 8_192,
       });
       if (response.statusCode !== 200) return Option.none<ProviderDaemonLiveness>();
@@ -261,6 +306,7 @@ export const makeWindowsDesktopProviderDaemonManager = Effect.fn(function* (
         try: async () => {
           const response = await requestJson(current.endpoint, PROVIDER_DAEMON_HEALTH_PATH, {
             timeoutMs: 5_000,
+            signal: AbortSignal.timeout(5_000),
             maxResponseBytes: 1_048_576,
           });
           if (response.statusCode !== 200) throw new Error(unavailable);

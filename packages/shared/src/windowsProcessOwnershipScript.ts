@@ -14,6 +14,8 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 try {
+[Console]::Out.WriteLine('{"id":0,"ok":true,"phase":"source"}')
+[Console]::Out.Flush()
 Add-Type -ReferencedAssemblies System.Web.Extensions -TypeDefinition @'
 using System;
 using System.IO;
@@ -258,6 +260,9 @@ public static class CafeWindowsOwnership {
   }
   public static void Main() {
     try {
+      // Node waits for this fixed readiness record before sending any JSON.
+      // Initialization cannot prefetch and discard the first ownership request.
+      Console.Out.WriteLine("{\"id\":0,\"ok\":true,\"phase\":\"ready\"}"); Console.Out.Flush();
       while (true) {
         string line = ReadBoundedLine(); if (line == null) break;
         long id = 0; bool closing = false; Dictionary<string,object> response;

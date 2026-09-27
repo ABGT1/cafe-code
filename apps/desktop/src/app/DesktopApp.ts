@@ -284,7 +284,9 @@ export const runProviderDaemonHealthWatchdog = Effect.fn("desktop.providerDaemon
           windowsRecoveryFailures += 1;
           windowsRecoveryCooldown = Math.min(6, 2 ** Math.min(windowsRecoveryFailures - 1, 3));
           if (windowsRecoveryFailures === 1) {
-            yield* logDaemonWatchdogWarning("provider daemon ownership recovery pending; preserving uncertain runtime");
+            yield* logDaemonWatchdogWarning(
+              "provider daemon ownership recovery pending; preserving uncertain runtime",
+            );
           }
         }
         continue;

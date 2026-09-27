@@ -17,11 +17,13 @@ import {
   type ProviderDaemonHealth as ProviderDaemonHealthValue,
   type ProviderDaemonLeaseResponse as ProviderDaemonLeaseResponseValue,
   type ProviderDaemonMarker as ProviderDaemonMarkerValue,
+  type WindowsProcessIdentity,
 } from "@cafecode/contracts";
 import { requestProviderDaemonJson } from "@cafecode/shared/providerDaemonHttp";
 import {
   createWindowsProviderRuntime,
   spawnWindowsProviderRuntimeChild,
+  WindowsProviderRuntimeError,
 } from "@cafecode/shared/windowsProviderRuntime";
 import * as Clock from "effect/Clock";
 import * as Data from "effect/Data";
@@ -95,6 +97,8 @@ export interface ProviderSupervisorProcessSnapshot {
   readonly appVersion: string;
   readonly protocolVersion: number;
   readonly runtimeBuildId?: string;
+  readonly windowsProcessIdentity?: WindowsProcessIdentity;
+  readonly windowsOwnershipId?: string;
   readonly adoptedExistingProcess: boolean;
   readonly durationMs: number;
   readonly health: ProviderDaemonHealthValue;
@@ -441,8 +445,10 @@ const ensureWindowsProviderSupervisorProcess = (
             bootstrap,
           });
         },
-        fetchHealth: fetchProviderSupervisorHealth,
-        issueLease: issueProviderSupervisorLease,
+        // Use the shared Windows controller's bounded health/lease transport:
+        // it enforces an absolute deadline and response byte cap. The legacy
+        // POSIX helpers below have socket-idle timeouts only; injecting them
+        // here could let a dribbling peer outlive the native guard deadline.
       });
       const result = await runtime.ensure();
       return {
@@ -457,6 +463,12 @@ const ensureWindowsProviderSupervisorProcess = (
           protocolVersion: PROVIDER_SUPERVISOR_PROTOCOL_VERSION,
           ...(input.runtimeBuildId === undefined ? {} : { runtimeBuildId: input.runtimeBuildId }),
           adoptedExistingProcess: result.adopted,
+          ...(result.marker.windowsProcessIdentity === undefined
+            ? {}
+            : { windowsProcessIdentity: result.marker.windowsProcessIdentity }),
+          ...(result.marker.windowsOwnershipId === undefined
+            ? {}
+            : { windowsOwnershipId: result.marker.windowsOwnershipId }),
           durationMs: Math.round((performance.now() - startedAtMs) * 100) / 100,
           health: result.health,
         },
@@ -464,11 +476,13 @@ const ensureWindowsProviderSupervisorProcess = (
     },
     // Shared/native failures may carry private transport or credential material.
     // Uncertainty must preserve ownership and never fall into POSIX cleanup.
-    catch: () =>
+    catch: (error) =>
       new ProviderSupervisorProcessError({
         operation: "Windows supervisor ownership",
         cause:
-          "Provider supervisor ownership could not be verified. Existing processes and ownership records were preserved.",
+          error instanceof WindowsProviderRuntimeError
+            ? new WindowsProviderRuntimeError(error.reason).message
+            : "Provider supervisor ownership could not be verified. Existing processes and ownership records were preserved.",
       }),
   });
 

@@ -30,6 +30,7 @@ type Request = Record<string, unknown> & { id: number; op: string };
 /** Private pipe fixture: no Windows process, provider binary or user profile. */
 function fixture(
   handle: (request: Request, reply: (result: unknown) => void, raw: (line: string) => void) => void,
+  options: { readonly automaticReady?: boolean } = {},
 ) {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
@@ -44,6 +45,11 @@ function fixture(
       const line = String(chunk).trimEnd();
       if (source === undefined) {
         source = Buffer.from(line, "base64").toString("utf8");
+        if (options.automaticReady !== false)
+          queueMicrotask(() => {
+            for (const phase of ["bootstrap", "source", "ready"])
+              raw(JSON.stringify({ id: 0, ok: true, phase }));
+          });
       } else {
         const request = JSON.parse(line) as Request;
         requests.push(request);
@@ -136,6 +142,43 @@ describe("Windows process ownership protocol", () => {
       expect(await observeWindowsProcess(identity, fake.dependencies)).toEqual({ status });
     },
   );
+
+  it("waits for compiled native readiness before writing the first JSON request", async () => {
+    const fake = fixture((_request, reply) => reply({ status: "present", identity }), {
+      automaticReady: false,
+    });
+    const onStartupPhase = vi.fn();
+    const operation = captureWindowsProcessIdentity(identity.pid, {
+      ...fake.dependencies,
+      onStartupPhase,
+    });
+    await Promise.resolve();
+    expect(fake.requests).toHaveLength(0);
+    fake.raw('{"id":0,"ok":true,"phase":"bootstrap"}');
+    fake.raw('{"id":0,"ok":true,"phase":"source"}');
+    expect(fake.requests).toHaveLength(0);
+    fake.raw('{"id":0,"ok":true,"phase":"ready"}');
+    expect(await operation).toEqual({ status: "present", identity });
+    expect(fake.requests).toHaveLength(1);
+    expect(onStartupPhase.mock.calls).toEqual([["bootstrap"], ["source"], ["ready"]]);
+  });
+
+  it("fails closed on a missing or out-of-order native readiness handshake", async () => {
+    const stalled = fixture(() => undefined, { automaticReady: false });
+    expect(
+      await captureWindowsProcessIdentity(identity.pid, {
+        ...stalled.dependencies,
+        operationTimeoutMs: 5,
+      }),
+    ).toEqual({ status: "unknown", reason: "helper-timeout" });
+    expect(stalled.requests).toHaveLength(0);
+    const unordered = fixture(() => undefined, { automaticReady: false });
+    const operation = captureWindowsProcessIdentity(identity.pid, unordered.dependencies);
+    await Promise.resolve();
+    unordered.raw('{"id":0,"ok":true,"phase":"ready"}');
+    expect(await operation).toEqual({ status: "unknown", reason: "invalid-response" });
+    expect(unordered.requests).toHaveLength(0);
+  });
 
   it("does not reinterpret denied native observation as exit", async () => {
     const fake = fixture((_request, reply) =>
@@ -363,5 +406,25 @@ describe("Windows process ownership protocol", () => {
     await expect(session.close()).rejects.toMatchObject({ reason: "helper-exit-unconfirmed" });
     expect(fake.requests.map((request) => request.op)).toEqual(["open", "close"]);
     fake.events.emit("exit", 0);
+  });
+
+  it("accepts confirmed helper exit when the exit event overtakes the close ACK", async () => {
+    const fake = fixture((request, reply) => {
+      if (request.op === "open") reply({ opened: true });
+      else fake.events.emit("exit", 0);
+    });
+    const session = await openWindowsOwnershipSession(sessionInput, fake.dependencies);
+    await expect(session.close()).resolves.toBeUndefined();
+    expect(fake.requests.map((request) => request.op)).toEqual(["open", "close"]);
+  });
+
+  it("does not promote a malformed close response even after confirmed exit", async () => {
+    const fake = fixture((request, reply, raw) => {
+      if (request.op === "open") reply({ opened: true });
+      else raw("invalid private native response");
+    });
+    const session = await openWindowsOwnershipSession(sessionInput, fake.dependencies);
+    await expect(session.close()).rejects.toMatchObject({ reason: "invalid-response" });
+    expect(fake.requests.map((request) => request.op)).toEqual(["open", "close"]);
   });
 });

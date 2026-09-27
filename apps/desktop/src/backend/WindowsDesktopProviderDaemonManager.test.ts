@@ -122,6 +122,39 @@ afterEach(() => {
 });
 
 describe("Windows desktop daemon authority adapter", () => {
+  it("stops an upstream supervisor only through its separate authenticated generation and birth identity", async () => {
+    const daemon = runtimeFixture();
+    const supervisor = runtimeFixture();
+    const configurations: WindowsProviderRuntimeOptions[] = [];
+    await Effect.runPromise(
+      makeWindowsDesktopProviderDaemonManager(environment, "test-build", {
+        createRuntime: (input) => {
+          configurations.push(input);
+          return input.role === "provider-daemon" ? daemon : supervisor;
+        },
+      }).pipe(Effect.provideService(ElectronSafeStorage.ElectronSafeStorage, safeStorage)),
+    );
+    await configurations[0]!.stopSupervisor!({ ownershipId: generation, identity });
+    expect(configurations.map((input) => input.role)).toEqual([
+      "provider-daemon",
+      "provider-supervisor",
+    ]);
+    expect(supervisor.stop).toHaveBeenCalledWith(generation, identity);
+    expect(supervisor.ensure).not.toHaveBeenCalled();
+    expect(daemon.stop).not.toHaveBeenCalled();
+    expect(configurations[1]!.markerPath).toContain("provider-supervisor.json");
+    expect(configurations[1]!.legacyCredentialPath).toContain("provider-supervisor-token");
+    expect(
+      await configurations[1]!.decodeCredential(
+        Buffer.from("synthetic-supervisor-token\n").toString("base64"),
+        false,
+      ),
+    ).toBe("synthetic-supervisor-token");
+    await expect(configurations[1]!.decodeCredential("c3ludGhldGlj", true)).rejects.toThrow(
+      "credential-unavailable",
+    );
+  });
+
   it("publishes only the admitted lease and preserves the encryption policy", async () => {
     const { manager, options } = await setup();
     expect(Option.isNone(await Effect.runPromise(manager.currentConfig))).toBe(true);

@@ -209,7 +209,16 @@ export async function runWindowsProcessOwnershipSmoke(): Promise<void> {
     child = await startFixture();
     assert.ok(child.pid);
     let started = performance.now();
-    const captured = await captureWindowsProcessIdentity(child.pid);
+    const captured = await captureWindowsProcessIdentity(child.pid, {
+      onStartupPhase: (phase) =>
+        console.info(
+          JSON.stringify({
+            phase: "native-helper-startup",
+            helperPhase: phase,
+            durationMs: Math.round(performance.now() - started),
+          }),
+        ),
+    });
     timing.coldCaptureMs = Math.round(performance.now() - started);
     // Fixed native outcomes diagnose setup/policy failures without printing the
     // helper's raw stdout/stderr, target command line, PID or filesystem paths.

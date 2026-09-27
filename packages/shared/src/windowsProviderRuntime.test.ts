@@ -17,6 +17,17 @@ const secondIdentity: WindowsProcessIdentity = {
 const token = "synthetic-private-token-not-a-real-account-token";
 const credential = Buffer.from(token).toString("base64");
 const socketPath = "\\\\.\\pipe\\cafe-runtime-test";
+const withSupervisor = (health: ProviderDaemonHealth): ProviderDaemonHealth => ({
+  ...health,
+  upstreamSupervisor: {
+    configured: true,
+    reachable: true,
+    mode: "provider-supervisor",
+    pid: 333,
+    windowsOwnershipId: "ae5b2b29-72ef-4d31-9571-50856776e18b",
+    windowsProcessIdentity: { pid: 333, creationTime100ns: "134000000000000333" },
+  },
+});
 const marker = (overrides: Partial<ProviderDaemonMarker> = {}): ProviderDaemonMarker => ({
   version: 2,
   mode: "provider-daemon",
@@ -461,6 +472,26 @@ describe("Windows provider runtime ownership lifecycle", () => {
     expect(f.spawn).not.toHaveBeenCalled();
   });
 
+  it("replaces an authenticated incompatible build through verified-handle termination", async () => {
+    const f = fixture(marker({ appVersion: "older-version" }));
+    const accepted = await f.runtime.ensure();
+    expect(f.session.terminate).toHaveBeenCalledExactlyOnceWith(identity);
+    expect(accepted.marker.pid).toBe(201);
+    expect(accepted.marker.appVersion).toBe("1.0.0");
+  });
+
+  it("refuses a PID reused between the last observation and same-handle termination", async () => {
+    const f = fixture();
+    await f.runtime.ensure();
+    vi.mocked(f.session.terminate).mockImplementationOnce(async () => {
+      f.processes.set(identity.pid, secondIdentity);
+      return { status: "different-process" };
+    });
+    await f.runtime.stop(ownershipId);
+    expect(f.processes.get(identity.pid)).toEqual(secondIdentity);
+    expect(f.record).toBeNull();
+  });
+
   it("a replaced marker fences a stale watchdog before any mutation", async () => {
     const f = fixture();
     const result = await f.runtime.ensure();
@@ -491,6 +522,70 @@ describe("Windows provider runtime ownership lifecycle", () => {
     expect(f.spawn).not.toHaveBeenCalled();
   });
 
+  it("re-observes a supervisor after a lost retirement reply without repeating the stop", async () => {
+    const f = fixture(marker({ mode: "provider-supervisor" }));
+    const runtime = createWindowsProviderRuntime({ ...f.options, role: "provider-supervisor" });
+    await runtime.ensure();
+    f.setRetireFailure(true);
+    await expect(runtime.stop(ownershipId, identity)).rejects.toMatchObject({
+      reason: "mutation-uncertain",
+    });
+    expect(f.record).toBeNull();
+    await runtime.stop(ownershipId, identity);
+    expect(runtime.current()).toBeNull();
+    expect(f.session.terminate).toHaveBeenCalledTimes(1);
+    expect(f.session.retire).toHaveBeenCalledTimes(1);
+    expect(f.spawn).not.toHaveBeenCalled();
+  });
+
+  it("an absent already-retired owner never signals a recycled PID", async () => {
+    const f = fixture(null);
+    f.processes.set(identity.pid, secondIdentity);
+    await f.runtime.stop(ownershipId, identity);
+    expect(f.processes.get(identity.pid)).toEqual(secondIdentity);
+    expect(f.session.terminate).not.toHaveBeenCalled();
+    expect(f.session.retire).not.toHaveBeenCalled();
+    expect(f.spawn).not.toHaveBeenCalled();
+  });
+
+  it.each(["same-process", "unknown"] as const)(
+    "an absent ownership record preserves a %s process",
+    async (status) => {
+      const f = fixture(null);
+      f.setObservationUnknown(status === "unknown");
+      await expect(f.runtime.stop(ownershipId, identity)).rejects.toMatchObject({
+        reason: "identity-unknown",
+      });
+      expect(f.session.terminate).not.toHaveBeenCalled();
+      expect(f.session.retire).not.toHaveBeenCalled();
+    },
+  );
+
+  it("an owner appearing during retirement re-observation fences the stale stop", async () => {
+    const f = fixture(null);
+    const replacement = marker({ windowsOwnershipId: "ce5b2b29-72ef-4d31-9571-50856776e18b" });
+    vi.mocked(f.session.observe).mockImplementationOnce(async () => {
+      f.setRecord(replacement);
+      return { status: "exited" };
+    });
+    await expect(f.runtime.stop(ownershipId, identity)).rejects.toMatchObject({
+      reason: "ownership-changed",
+    });
+    expect(f.record).toEqual(replacement);
+    expect(f.session.terminate).not.toHaveBeenCalled();
+    expect(f.session.retire).not.toHaveBeenCalled();
+  });
+
+  it("an absent marker without a trusted expected birth identity remains inconclusive", async () => {
+    const f = fixture(null);
+    f.processes.delete(identity.pid);
+    await expect(f.runtime.stop(ownershipId)).rejects.toMatchObject({
+      reason: "ownership-changed",
+    });
+    expect(f.session.observe).not.toHaveBeenCalled();
+    expect(f.session.retire).not.toHaveBeenCalled();
+  });
+
   it("preserves separately configured supervisor ownership instead of killing a cached PID", async () => {
     const f = fixture();
     f.setResponse({
@@ -500,6 +595,96 @@ describe("Windows provider runtime ownership lifecycle", () => {
     await f.runtime.ensure();
     await expect(f.runtime.stop()).rejects.toMatchObject({ reason: "upstream-ownership-unknown" });
     expect(f.session.terminate).not.toHaveBeenCalled();
+  });
+
+  it("releases the daemon guard before stopping its independently bound supervisor", async () => {
+    const f = fixture();
+    f.setResponse(withSupervisor(f.health()));
+    const stopSupervisor = vi.fn(async () => {
+      expect(f.session.close).toHaveBeenCalledTimes(2); // adoption plus first stop transaction
+      expect(f.session.terminate).not.toHaveBeenCalled();
+    });
+    const runtime = createWindowsProviderRuntime({ ...f.options, stopSupervisor });
+    await runtime.ensure();
+    await runtime.stop(ownershipId);
+    expect(stopSupervisor).toHaveBeenCalledExactlyOnceWith({
+      ownershipId: "ae5b2b29-72ef-4d31-9571-50856776e18b",
+      identity: { pid: 333, creationTime100ns: "134000000000000333" },
+    });
+    expect(f.session.close).toHaveBeenCalledTimes(3);
+    expect(f.session.terminate).toHaveBeenCalledExactlyOnceWith(identity);
+  });
+
+  it("refuses a changed daemon revision after the separate supervisor transaction", async () => {
+    const f = fixture();
+    f.setResponse(withSupervisor(f.health()));
+    const stopSupervisor = vi.fn(async () => {
+      f.setRecord(marker({ updatedAt: "2026-09-27T01:00:00.000Z" }));
+    });
+    const runtime = createWindowsProviderRuntime({ ...f.options, stopSupervisor });
+    await runtime.ensure();
+    await expect(runtime.stop(ownershipId)).rejects.toMatchObject({ reason: "ownership-changed" });
+    expect(f.session.terminate).not.toHaveBeenCalled();
+    expect(f.session.retire).not.toHaveBeenCalled();
+  });
+
+  it("preserves a newly reported supervisor after reacquiring an unchanged daemon marker", async () => {
+    const f = fixture();
+    const health = withSupervisor(f.health());
+    f.setResponse(health);
+    const stopSupervisor = vi.fn(async () => {
+      f.setResponse({
+        ...health,
+        upstreamSupervisor: {
+          ...health.upstreamSupervisor!,
+          windowsOwnershipId: "ce5b2b29-72ef-4d31-9571-50856776e18b",
+        },
+      });
+    });
+    const runtime = createWindowsProviderRuntime({ ...f.options, stopSupervisor });
+    await runtime.ensure();
+    await expect(runtime.stop(ownershipId)).rejects.toMatchObject({ reason: "endpoint-conflict" });
+    expect(f.session.terminate).not.toHaveBeenCalled();
+    expect(f.session.retire).not.toHaveBeenCalled();
+  });
+
+  it("allows expected upstream disappearance during an incompatible-runtime replacement", async () => {
+    const f = fixture(marker({ appVersion: "older-version" }));
+    let stopped = false;
+    const runtime = createWindowsProviderRuntime({
+      ...f.options,
+      fetchHealth: async () =>
+        f.record?.pid === identity.pid
+          ? stopped
+            ? { ...f.health(), upstreamSupervisor: { configured: true, reachable: false } }
+            : withSupervisor(f.health())
+          : f.health(),
+      stopSupervisor: async () => {
+        stopped = true;
+      },
+    });
+    const accepted = await runtime.ensure();
+    expect(accepted.marker.pid).toBe(201);
+    expect(f.session.terminate).toHaveBeenCalledExactlyOnceWith(identity);
+  });
+
+  it("a superseded supervisor or uncertain guard release preserves the daemon", async () => {
+    const f = fixture();
+    f.setResponse(withSupervisor(f.health()));
+    const stopSupervisor = vi.fn(async () => {
+      throw new Error("supervisor generation changed");
+    });
+    const runtime = createWindowsProviderRuntime({ ...f.options, stopSupervisor });
+    await runtime.ensure();
+    await expect(runtime.stop(ownershipId)).rejects.toMatchObject({
+      reason: "upstream-ownership-unknown",
+    });
+    expect(f.session.terminate).not.toHaveBeenCalled();
+    vi.mocked(f.session.close).mockRejectedValueOnce(new Error("exit observation lost"));
+    await expect(runtime.stop(ownershipId)).rejects.toMatchObject({
+      reason: "upstream-ownership-unknown",
+    });
+    expect(stopSupervisor).toHaveBeenCalledTimes(1);
   });
 
   it("closes guards and exposes no native errors or private material", async () => {

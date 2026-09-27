@@ -1,7 +1,7 @@
 # Windows daemon ownership uses process identity, not PID existence
 
 Created: 2026-09-27 18:58:45 JST (UTC+0900)
-Last updated: 2026-09-27 18:58:45 JST (UTC+0900)
+Last updated: 2026-09-27 19:41:49 JST (UTC+0900)
 Decision status: accepted for implementation by the user's explicit Windows fix request.
 Implementation status: in progress; native Windows qualification pending.
 Supersession: none.
@@ -20,9 +20,15 @@ A fixed, hidden system PowerShell helper owns native process handles and the exc
 
 Process observations distinguish same process, different process, confirmed exit and unknown. Access denial, helper timeout, unreadable records, malformed responses and missing identity remain unknown. Termination compares creation identity and acts through the same native handle, then confirms exit with a bounded wait. There is no PID-only kill fallback, privilege escalation, policy bypass, or broad process scan.
 
-Authenticated legacy owners may gain native identity without rotating their credentials or restarting sessions. A legacy PID that still exists but cannot authenticate remains inconclusive; marker timestamps, process names and age are not substitutes for OS identity. An unbound prepared attempt remains parked unless its exact child exit is proven.
+Authenticated legacy owners may gain native identity without rotating their credentials or restarting sessions. A legacy PID that still exists but cannot authenticate remains inconclusive; marker timestamps, process names and age are not substitutes for OS identity. An unbound prepared attempt can recover only through an authenticated reply carrying its exact bootstrap generation and child identity followed by independent native verification. Otherwise it remains parked unless its exact child exit is proven.
 
 The desktop watchdog observes native ownership only after authenticated liveness fails. Healthy cycles remain cheap. Unknown ownership or quiet reasoning never triggers a restart. Verified stale ownership permits backend stop, fenced daemon replacement and backend restart with a newly issued lease; a stale watchdog generation cannot replace a newer owner. Supervisor cleanup uses its own independent authority and never inherits authority from a cached upstream PID.
+
+If replacement or backend restart fails after the backend was stopped, the watchdog retains an explicit pending-recovery state. Subsequent bounded-backoff attempts re-observe/admit the durable current or prepared generation through `ensure`; they do not repeat the old termination. User quit still wins before backend restart. A healthy daemon alone cannot clear this state before the backend reconnects.
+
+Cross-role cleanup closes and confirms exit of the daemon's guard helper before opening the supervisor guard. The supervisor controller checks its own authenticated generation and birth identity, then the daemon transaction reacquires its guard and requires the same marker revision and fresh upstream health. A newly reported positive supervisor owner aborts the older cleanup. No nested role locks, cached-PID kills or automatic supervisor handoff are introduced.
+
+Current finite budgets are 15 seconds per helper operation, 120 seconds per helper session, 5 seconds for guard acquisition and 3 seconds each for same-handle exit wait/helper close. These are failure bounds, not ownership evidence. Control HTTP requests have absolute deadlines in addition to idle socket timeouts. Protocol input/output and ownership records are bounded; helper errors use an allowlist. Native qualification must establish these budgets are sufficient on the supported runtime.
 
 ## Alternatives and consequences
 

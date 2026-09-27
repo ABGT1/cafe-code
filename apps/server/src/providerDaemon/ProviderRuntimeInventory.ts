@@ -40,6 +40,27 @@ function sanitizeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Forward only authenticated supervisor identity on Windows. It is evidence
+ * for selecting the supervisor's own fenced ownership transaction, never a
+ * grant to signal the copied PID. The daemon and supervisor guards must remain
+ * separate so shutdown cannot deadlock two profile ownership transactions.
+ */
+export function windowsSupervisorOwnershipMetadata(
+  health: ProviderDaemonHealth,
+  platform: NodeJS.Platform = process.platform,
+): Pick<ProviderDaemonUpstreamSupervisorHealth, "windowsOwnershipId" | "windowsProcessIdentity"> {
+  if (platform !== "win32") return {};
+  return {
+    ...(health.windowsProcessIdentity === undefined
+      ? {}
+      : { windowsProcessIdentity: health.windowsProcessIdentity }),
+    ...(health.windowsOwnershipId === undefined
+      ? {}
+      : { windowsOwnershipId: health.windowsOwnershipId }),
+  };
+}
+
 export const ProviderRuntimeInventoryLocalLive = Layer.effect(
   ProviderRuntimeInventory,
   Effect.gen(function* () {
@@ -120,6 +141,7 @@ export const ProviderRuntimeInventoryRemoteSupervisorLive = Layer.effect(
             protocolVersion: health.protocolVersion,
             version: health.version,
             runtimeBuildId: health.runtimeBuildId,
+            ...windowsSupervisorOwnershipMetadata(health),
             startedAt: health.startedAt,
             activeSessionCount: health.activeSessionCount,
             configuredInstanceCount: health.configuredInstanceCount,
