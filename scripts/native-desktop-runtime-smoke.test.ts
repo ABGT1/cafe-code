@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 
 import {
   desktopSmokeChromiumSwitches,
+  hasWindowsProviderOwnershipEvidence,
   isReadyDesktopDebugSnapshot,
   parseRuntimeSmokeArgs,
   readDebugUrl,
@@ -10,6 +11,30 @@ import {
 } from "./native-desktop-runtime-smoke.ts";
 
 describe("native desktop runtime smoke", () => {
+  it("requires exact authenticated Windows identity plus generation for new Windows artifact readiness", () => {
+    const health = {
+      ok: true,
+      pid: 27,
+      windowsProcessIdentity: { pid: 27, creationTime100ns: "134348901321234567" },
+      windowsOwnershipId: "9a90b48d-868f-4614-ae9c-66d50293d52b",
+    };
+    assert.isTrue(hasWindowsProviderOwnershipEvidence({ providerDaemon: { lastHealth: health } }));
+    for (const invalid of [
+      {},
+      { ...health, windowsOwnershipId: undefined },
+      { ...health, windowsOwnershipId: "not-a-generation" },
+      { ...health, windowsProcessIdentity: undefined },
+      { ...health, windowsProcessIdentity: { pid: 28, creationTime100ns: "134348901321234567" } },
+      {
+        ...health,
+        windowsProcessIdentity: { pid: 27, creationTime100ns: Number("134348901321234567") },
+      },
+      { ...health, windowsProcessIdentity: { pid: 27, creationTime100ns: "18446744073709551616" } },
+    ])
+      assert.isFalse(
+        hasWindowsProviderOwnershipEvidence({ providerDaemon: { lastHealth: invalid } }),
+      );
+  });
   it("parses explicit app and resource paths", () => {
     const options = parseRuntimeSmokeArgs(["--app", "./Cafe Code", "--resources", "./Resources"]);
     assert.match(options.appPath, /Cafe Code$/);

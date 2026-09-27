@@ -3,7 +3,103 @@ import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-import { ProviderDaemonSubagentDetail } from "./providerDaemon.ts";
+import {
+  ProviderDaemonBootstrap,
+  ProviderDaemonLiveness,
+  ProviderDaemonMarker,
+  ProviderDaemonSubagentDetail,
+  WindowsProcessIdentity,
+} from "./providerDaemon.ts";
+
+const OWNERSHIP_ID = "9a90b48d-868f-4614-ae9c-66d50293d52b";
+const decodeDaemonLiveness = Schema.decodeUnknownSync(ProviderDaemonLiveness);
+
+it("validates Windows PID and exact canonical unsigned FILETIME boundaries", () => {
+  const decode = Schema.decodeUnknownSync(WindowsProcessIdentity);
+  for (const identity of [
+    { pid: 1, creationTime100ns: "1" },
+    { pid: 4_294_967_295, creationTime100ns: "18446744073709551615" },
+    { pid: 27424, creationTime100ns: "134348901321234567" },
+  ]) {
+    assert.deepEqual(decode(identity), identity);
+    assert.equal(typeof decode(identity).creationTime100ns, "string");
+  }
+  for (const pid of [0, -1, 4_294_967_296, 1.5, NaN, Infinity, "1"]) {
+    assert.throws(() => decode({ pid, creationTime100ns: "1" }));
+  }
+  for (const creationTime100ns of [
+    "0",
+    "01",
+    "-1",
+    "+1",
+    "1.0",
+    "1e3",
+    " 1",
+    "1 ",
+    "18446744073709551616",
+    "999999999999999999999",
+    Number("134348901321234567"),
+    null,
+  ]) {
+    assert.throws(() => decode({ pid: 1, creationTime100ns }));
+  }
+});
+
+it("preserves legacy marker and POSIX payload shape while accepting Windows ownership fields", () => {
+  const decodeMarker = Schema.decodeUnknownSync(ProviderDaemonMarker);
+  const legacy = {
+    version: 2,
+    pid: 27,
+    httpBaseUrl: "http://provider-daemon.local",
+    createdAt: "2026-09-27T00:00:00.000Z",
+    updatedAt: "2026-09-27T00:00:00.000Z",
+    appVersion: "0.2.0",
+  } as const;
+  assert.deepEqual(decodeMarker(legacy), legacy);
+  assert.deepEqual(decodeMarker({ ...legacy, version: 1 }), { ...legacy, version: 1 });
+  const windows = {
+    ...legacy,
+    windowsProcessIdentity: { pid: 27, creationTime100ns: "134348901321234567" },
+    windowsOwnershipId: OWNERSHIP_ID,
+    windowsOwnershipState: "committed",
+  };
+  assert.deepEqual(decodeMarker(windows), windows);
+  assert.throws(() => decodeMarker({ ...windows, windowsOwnershipId: "not-a-uuid" }));
+  assert.throws(() => decodeMarker({ ...windows, windowsOwnershipState: "unknown" }));
+  assert.equal(
+    decodeMarker({ ...windows, windowsOwnershipState: "prepared" }).windowsOwnershipState,
+    "prepared",
+  );
+
+  const bootstrap = {
+    mode: "provider-daemon",
+    cafeCodeHome: "/synthetic-profile",
+    token: "synthetic-bootstrap-capability-000000000000",
+  } as const;
+  const decodeBootstrap = Schema.decodeUnknownSync(ProviderDaemonBootstrap);
+  assert.deepEqual(decodeBootstrap(bootstrap), bootstrap);
+  assert.equal(
+    decodeBootstrap({ ...bootstrap, windowsOwnershipId: OWNERSHIP_ID }).windowsOwnershipId,
+    OWNERSHIP_ID,
+  );
+  const liveness = {
+    ok: true,
+    mode: "provider-daemon",
+    pid: 27,
+    ppid: 1,
+    version: "0.2.0",
+    startedAt: legacy.createdAt,
+  } as const;
+  assert.deepEqual(decodeDaemonLiveness(liveness), liveness);
+  assert.deepEqual(
+    decodeDaemonLiveness({
+      ...liveness,
+      windowsProcessIdentity: windows.windowsProcessIdentity,
+      windowsOwnershipId: OWNERSHIP_ID,
+    }).windowsProcessIdentity,
+    windows.windowsProcessIdentity,
+  );
+});
 
 const decodeProviderDaemonSubagentDetail = Schema.decodeUnknownEffect(ProviderDaemonSubagentDetail);
 

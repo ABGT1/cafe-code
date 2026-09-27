@@ -115,6 +115,33 @@ export function summarizeDesktopDebugReadiness(value: unknown): Record<string, u
   };
 }
 
+/**
+ * A new isolated Windows install must reach the generation-aware daemon path,
+ * not merely respond to HTTP through an accidentally adopted legacy process.
+ * Return only a boolean; native identities and capability material stay out of
+ * smoke diagnostics. POSIX readiness remains on its original predicates.
+ */
+export function hasWindowsProviderOwnershipEvidence(value: unknown): boolean {
+  const daemon = readRecord(readRecord(value)?.providerDaemon);
+  const health = readRecord(daemon?.lastHealth);
+  const identity = readRecord(health?.windowsProcessIdentity);
+  const birth = identity?.creationTime100ns;
+  const generation = health?.windowsOwnershipId;
+  return (
+    health?.ok === true &&
+    typeof health.pid === "number" &&
+    Number.isInteger(health.pid) &&
+    health.pid > 0 &&
+    health.pid <= 0xffff_ffff &&
+    identity?.pid === health.pid &&
+    typeof birth === "string" &&
+    /^[1-9][0-9]{0,19}$/.test(birth) &&
+    BigInt(birth) <= 0xffff_ffff_ffff_ffffn &&
+    typeof generation === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(generation)
+  );
+}
+
 export function isReadyDesktopDebugSnapshot(value: unknown): boolean {
   const summary = summarizeDesktopDebugReadiness(value);
   return Object.entries(summary).every(
@@ -325,9 +352,20 @@ async function runPackagedApplicationSmoke(
       await waitFor(
         "provider daemon health and renderer WebSocket hydration",
         async () => {
-          const snapshot = await readJsonResponse(debugUrl);
+          // Compact debug deliberately omits detailed process-generation data.
+          // This Windows-only smoke owns an isolated synthetic profile, reads
+          // the full response locally, and emits only fixed readiness booleans.
+          const snapshot = await readJsonResponse(
+            process.platform === "win32" ? `${debugUrl}?detail=full` : debugUrl,
+          );
           lastDebugReadiness = summarizeDesktopDebugReadiness(snapshot);
-          return isReadyDesktopDebugSnapshot(snapshot) ? snapshot : undefined;
+          const windowsOwnershipReady =
+            process.platform !== "win32" || hasWindowsProviderOwnershipEvidence(snapshot);
+          if (process.platform === "win32")
+            lastDebugReadiness.windowsOwnershipVerified = windowsOwnershipReady;
+          return isReadyDesktopDebugSnapshot(snapshot) && windowsOwnershipReady
+            ? snapshot
+            : undefined;
         },
         STARTUP_TIMEOUT_MS,
       );

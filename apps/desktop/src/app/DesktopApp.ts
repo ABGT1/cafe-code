@@ -248,11 +248,46 @@ export const runProviderDaemonHealthWatchdog = Effect.fn("desktop.providerDaemon
     );
     const isDaemonProcessAlive = input.isDaemonProcessAlive ?? isPidAlive;
     let consecutiveFailures = 0;
+    let windowsRecoveryPending = false;
+    let windowsRecoveryFailures = 0;
+    let windowsRecoveryCooldown = 0;
 
     while (!(yield* Ref.get(input.quitting))) {
       yield* Effect.sleep(checkInterval);
       if (yield* Ref.get(input.quitting)) {
         return;
+      }
+
+      if (windowsRecoveryPending) {
+        // A previous fenced recovery may have retired the dead owner before
+        // losing a readiness/mutation reply. There is then no admitted PID for
+        // the usual watchdog to observe. Retain this explicit recovery intent
+        // until the backend has its new lease; re-observe durable ownership via
+        // ensureRunning, never repeat termination using the old observation.
+        // Backoff is bounded in watchdog ticks (at most 30s at its default).
+        if (windowsRecoveryCooldown > 0) {
+          windowsRecoveryCooldown -= 1;
+          continue;
+        }
+        const resumed = yield* Effect.gen(function* () {
+          yield* input.providerDaemonManager.ensureRunning;
+          if (yield* Ref.get(input.quitting)) return false;
+          yield* input.backendManager.start;
+          return true;
+        }).pipe(Effect.catchCause(() => Effect.succeed(false)));
+        if (resumed) {
+          windowsRecoveryPending = false;
+          windowsRecoveryFailures = 0;
+          consecutiveFailures = 0;
+          yield* logDaemonWatchdogInfo("provider daemon pending ownership recovery completed");
+        } else {
+          windowsRecoveryFailures += 1;
+          windowsRecoveryCooldown = Math.min(6, 2 ** Math.min(windowsRecoveryFailures - 1, 3));
+          if (windowsRecoveryFailures === 1) {
+            yield* logDaemonWatchdogWarning("provider daemon ownership recovery pending; preserving uncertain runtime");
+          }
+        }
+        continue;
       }
 
       const liveness = yield* input.providerDaemonManager.probeLiveness.pipe(
@@ -270,7 +305,20 @@ export const runProviderDaemonHealthWatchdog = Effect.fn("desktop.providerDaemon
       consecutiveFailures += 1;
       const daemonSnapshot = yield* input.providerDaemonManager.snapshot;
       const daemonPid = Option.getOrUndefined(daemonSnapshot.pid);
-      const processIsKnownDead = daemonPid !== undefined && !isDaemonProcessAlive(daemonPid);
+      // Windows must distinguish a recycled PID from the original owner and
+      // access denial from a confirmed exit. Only that manager exposes this
+      // capability; existing POSIX boolean probing is deliberately unchanged.
+      const ownership = input.providerDaemonManager.observeProcessOwnership
+        ? yield* input.providerDaemonManager.observeProcessOwnership.pipe(
+            Effect.catchCause(() =>
+              Effect.succeed({ status: "unknown" as const, ownershipId: undefined }),
+            ),
+          )
+        : undefined;
+      const processIsKnownDead = ownership
+        ? (ownership.status === "exited" || ownership.status === "different-process") &&
+          ownership.ownershipId !== undefined
+        : daemonPid !== undefined && !isDaemonProcessAlive(daemonPid);
       if (!processIsKnownDead) {
         // The liveness route is deliberately database-free, but it still runs
         // on the provider daemon's Node.js event loop. Synchronous SQLite lock,
@@ -292,7 +340,9 @@ export const runProviderDaemonHealthWatchdog = Effect.fn("desktop.providerDaemon
         continue;
       }
 
-      const reason = `provider daemon process ${daemonPid} exited`;
+      const reason = ownership
+        ? "provider daemon ownership no longer matches"
+        : `provider daemon process ${daemonPid} exited`;
       yield* logDaemonWatchdogWarning("provider daemon recovery starting", {
         reason,
         consecutiveFailures,
@@ -307,14 +357,22 @@ export const runProviderDaemonHealthWatchdog = Effect.fn("desktop.providerDaemon
         yield* input.backendManager.stop({
           timeout: PROVIDER_DAEMON_RECOVERY_BACKEND_STOP_TIMEOUT,
         });
+        // Only the Windows ownership controller implements prepared attempts.
+        // Keep the existing POSIX recovery behavior unchanged.
+        windowsRecoveryPending = input.providerDaemonManager.observeProcessOwnership !== undefined;
         if (yield* Ref.get(input.quitting)) {
           return false;
         }
-        const endpoint = yield* input.providerDaemonManager.recover(reason);
+        // A newer owner may have been adopted while the backend stopped. The
+        // Windows controller rechecks this exact generation under its native
+        // guard before retirement; a stale observation cannot authorize it.
+        const endpoint = yield* input.providerDaemonManager.recover(reason, ownership?.ownershipId);
         if (yield* Ref.get(input.quitting)) {
           return false;
         }
         yield* input.backendManager.start;
+        windowsRecoveryPending = false;
+        windowsRecoveryFailures = 0;
         yield* logDaemonWatchdogInfo("provider daemon recovery completed", {
           endpoint: endpoint.httpBaseUrl,
           transport: endpoint.transport ?? "tcp",

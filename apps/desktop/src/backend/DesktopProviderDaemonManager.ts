@@ -45,6 +45,7 @@ import * as DesktopDebugServer from "../debug/DesktopDebugServer.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
+import { makeWindowsDesktopProviderDaemonManager } from "./WindowsDesktopProviderDaemonManager.ts";
 import * as NetService from "@cafecode/shared/Net";
 import {
   isPidAlive,
@@ -131,7 +132,15 @@ export interface DesktopProviderDaemonManagerShape {
    * Callers must restart the backend afterward because its lease capability is
    * immutable bootstrap data and is intentionally not shared through globals.
    */
-  readonly recover: (reason: string) => Effect.Effect<ProviderDaemonClientConfig>;
+  readonly recover: (
+    reason: string,
+    expectedOwnershipId?: string,
+  ) => Effect.Effect<ProviderDaemonClientConfig>;
+  /** Windows only: a PID can remain present after its original owner exits. */
+  readonly observeProcessOwnership?: Effect.Effect<{
+    readonly status: "same-process" | "different-process" | "exited" | "unknown";
+    readonly ownershipId?: string;
+  }>;
   readonly currentConfig: Effect.Effect<Option.Option<ProviderDaemonClientConfig>>;
   /**
    * Probe only authenticated process liveness. This path is deliberately
@@ -524,6 +533,13 @@ const waitForHealth = (
 
 const makeDesktopProviderDaemonManager = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
+  // Keep the established POSIX process groups, file permissions and cleanup
+  // untouched. Windows ownership must never fall through to a PID-only kill or
+  // the Effect spawner's process-tree finalizer after identity becomes unknown.
+  if (environment.platform === "win32") {
+    const runtimeBuildId = yield* computeProviderDaemonRuntimeBuildId(environment);
+    return yield* makeWindowsDesktopProviderDaemonManager(environment, runtimeBuildId);
+  }
   const fileSystem = yield* FileSystem.FileSystem;
   yield* NetService.NetService;
   const safeStorage = yield* ElectronSafeStorage.ElectronSafeStorage;

@@ -56,6 +56,23 @@ const ProviderDaemonToken = Schema.String.check(Schema.isMinLength(32));
 const ProviderDaemonCommandId = Schema.String.check(Schema.isMinLength(16));
 const ProviderDaemonLeaseId = Schema.String.check(Schema.isMinLength(16));
 
+/**
+ * Windows recycles PIDs. FILETIME must remain a canonical decimal string:
+ * converting the unsigned 64-bit native value to Number loses identity bits.
+ * These are ownership correlation fields, not authentication credentials.
+ */
+export const WindowsProcessIdentity = Schema.Struct({
+  pid: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 4_294_967_295 })),
+  creationTime100ns: Schema.String.check(
+    Schema.isPattern(/^[1-9][0-9]{0,19}$/),
+    Schema.makeFilter((value) => value.length < 20 || value <= "18446744073709551615"),
+  ),
+});
+export type WindowsProcessIdentity = typeof WindowsProcessIdentity.Type;
+
+export const WindowsOwnershipId = Schema.String.check(Schema.isUUID());
+export const WindowsOwnershipState = Schema.Literals(["prepared", "committed"]);
+
 export const ProviderDaemonTransport = Schema.Literals(["tcp", "ipc"]);
 export type ProviderDaemonTransport = typeof ProviderDaemonTransport.Type;
 
@@ -108,6 +125,9 @@ export const ProviderDaemonBootstrap = Schema.Struct({
   cafeMcpPort: Schema.optional(PortSchema),
   token: ProviderDaemonToken,
   runtimeBuildId: Schema.optional(Schema.String),
+  // Delivered only in the private bootstrap stream; the authenticated child
+  // echoes this generation together with its own cached native identity.
+  windowsOwnershipId: Schema.optional(WindowsOwnershipId),
   otlpTracesUrl: Schema.optional(Schema.String),
   otlpMetricsUrl: Schema.optional(Schema.String),
 });
@@ -137,6 +157,10 @@ export const ProviderDaemonMarker = Schema.Struct({
   appVersion: Schema.String,
   runtimeBuildId: Schema.optional(Schema.String),
   cafeMcpPort: Schema.optional(PortSchema),
+  // Optional for legacy marker decoding and omitted by all POSIX writers.
+  windowsProcessIdentity: Schema.optional(WindowsProcessIdentity),
+  windowsOwnershipId: Schema.optional(WindowsOwnershipId),
+  windowsOwnershipState: Schema.optional(WindowsOwnershipState),
 });
 export type ProviderDaemonMarker = typeof ProviderDaemonMarker.Type;
 
@@ -335,6 +359,8 @@ export const ProviderDaemonHealth = Schema.Struct({
   ppid: NonNegativeInt,
   version: Schema.String,
   runtimeBuildId: Schema.optional(Schema.String),
+  windowsProcessIdentity: Schema.optional(WindowsProcessIdentity),
+  windowsOwnershipId: Schema.optional(WindowsOwnershipId),
   startedAt: IsoDateTime,
   activeSessionCount: NonNegativeInt,
   configuredInstanceCount: NonNegativeInt,
@@ -379,6 +405,8 @@ export const ProviderDaemonLiveness = Schema.Struct({
   ppid: NonNegativeInt,
   version: Schema.String,
   runtimeBuildId: Schema.optional(Schema.String),
+  windowsProcessIdentity: Schema.optional(WindowsProcessIdentity),
+  windowsOwnershipId: Schema.optional(WindowsOwnershipId),
   startedAt: IsoDateTime,
   transport: Schema.optional(ProviderDaemonTransport),
 });

@@ -5,6 +5,11 @@ name: Reliability and dependency canaries
 # credentials: provider lifecycle cases use isolated synthetic runtimes.
 on:
   workflow_dispatch:
+    inputs:
+      windows_ownership_only:
+        description: Qualify Windows ownership and packaged runtime on this ref only
+        type: boolean
+        default: false
   schedule:
     - cron: "23 3 * * 1,4"
 
@@ -20,6 +25,7 @@ env:
 
 jobs:
   dependency-advisories:
+    if: ${{ !inputs.windows_ownership_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -36,6 +42,7 @@ jobs:
       - run: corepack yarn npm audit --all --recursive --no-deprecations
 
   process-lifecycle:
+    if: ${{ !inputs.windows_ownership_only }}
     strategy:
       fail-fast: false
       matrix:
@@ -58,16 +65,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-24.04
-            build: dist:desktop:linux
-            smoke: test:native-linux-artifact
-          - os: macos-15
-            build: dist:desktop:dmg:arm64
-            smoke: test:native-macos-artifact
-          - os: windows-2025
-            build: dist:desktop:win:x64
-            smoke: test:native-windows-artifact
+        # Manual Windows qualification can exercise a review ref without
+        # starting unrelated native builds. Scheduled coverage is unchanged.
+        include: ${{ fromJSON(inputs.windows_ownership_only && '[{"os":"windows-2025","build":"dist:desktop:win:x64","smoke":"test:native-windows-artifact"}]' || '[{"os":"ubuntu-24.04","build":"dist:desktop:linux","smoke":"test:native-linux-artifact"},{"os":"macos-15","build":"dist:desktop:dmg:arm64","smoke":"test:native-macos-artifact"},{"os":"windows-2025","build":"dist:desktop:win:x64","smoke":"test:native-windows-artifact"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     env:
@@ -75,7 +75,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: dev
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || 'dev' }}
       - uses: actions/setup-node@v6
         with:
           node-version: 24.13.1
@@ -86,6 +86,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake pkg-config libwayland-dev wayland-protocols libxkbcommon-dev libpng-dev libjson-c-dev libegl1-mesa-dev libx11-dev libxcursor-dev libxext-dev libxi-dev libxfixes-dev libxrandr-dev libxss-dev libxtst-dev libgbm-dev libdrm-dev libgles2-mesa-dev libpango1.0-dev libglib2.0-dev
+      - name: Qualify Windows process identity and ownership transactions
+        if: runner.os == 'Windows'
+        run: node scripts/windows-process-ownership-smoke.ts
       - run: corepack yarn ${{ matrix.build }}
       # Each smoke installs/launches in a test-owned environment, verifies
       # readiness rather than merely absence of errors, and cleans up its PIDs.

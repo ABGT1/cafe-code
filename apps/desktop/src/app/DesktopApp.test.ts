@@ -151,6 +151,125 @@ describe("DesktopApp provider daemon bootstrap credentials", () => {
 });
 
 describe("DesktopApp provider daemon watchdog", () => {
+  for (const status of ["same-process", "unknown", "different-process", "exited"] as const) {
+    it.effect(
+      `uses Windows ownership authority for ${status} without consulting PID existence`,
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const quitting = yield* Ref.make(false);
+            const actions: string[] = [];
+            let recovered = false;
+            const providerDaemonManager: DesktopProviderDaemonManagerShape = {
+              ensureRunning: Effect.succeed(endpoint),
+              recover: (_reason, expected) =>
+                Effect.sync(() => {
+                  assert.equal(expected, "observed-generation");
+                  actions.push("recover-daemon");
+                  recovered = true;
+                  return endpoint;
+                }),
+              currentConfig: Effect.succeed(Option.some(endpoint)),
+              probeLiveness: Effect.sync(() =>
+                recovered ? Option.some(liveDaemon) : Option.none(),
+              ),
+              observeProcessOwnership: Effect.sync(() => ({
+                status,
+                ownershipId: "observed-generation",
+              })),
+              refreshHealth: Effect.succeed(Option.none()),
+              snapshot: Effect.sync(daemonSnapshot),
+              stop: Effect.die("watchdog must not stop an unverified owner"),
+            };
+            const backendManager: DesktopBackendManagerShape = {
+              start: Effect.sync(() => {
+                actions.push("start-backend");
+              }),
+              stop: () =>
+                Effect.sync(() => {
+                  actions.push("stop-backend");
+                }),
+              currentConfig: Effect.succeed(Option.none()),
+              snapshot: Effect.succeed({
+                desiredRunning: true,
+                ready: true,
+                activePid: Option.some(process.pid),
+                restartAttempt: 0,
+                restartScheduled: false,
+              }),
+            };
+            const watchdog = yield* runProviderDaemonHealthWatchdog({
+              backendManager,
+              providerDaemonManager,
+              quitting,
+              checkInterval: Duration.millis(1),
+              isDaemonProcessAlive: () => {
+                throw new Error("PID-only observation is forbidden for Windows");
+              },
+            }).pipe(Effect.forkScoped);
+            yield* Effect.yieldNow;
+            yield* TestClock.adjust(Duration.millis(1));
+            yield* Effect.yieldNow;
+            yield* Fiber.interrupt(watchdog);
+            assert.deepStrictEqual(
+              actions,
+              status === "exited" || status === "different-process"
+                ? ["stop-backend", "recover-daemon", "start-backend"]
+                : [],
+            );
+          }).pipe(Effect.provide(TestClock.layer())),
+        ),
+    );
+  }
+
+  it.effect("requires a Windows generation fence even when an injected observer reports exit", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const quitting = yield* Ref.make(false);
+        let observations = 0;
+        const providerDaemonManager: DesktopProviderDaemonManagerShape = {
+          ensureRunning: Effect.succeed(endpoint),
+          recover: () => Effect.die("unfenced recovery forbidden"),
+          currentConfig: Effect.succeed(Option.some(endpoint)),
+          probeLiveness: Effect.succeed(Option.none()),
+          observeProcessOwnership: Effect.sync(() => {
+            observations += 1;
+            return { status: "exited" };
+          }),
+          refreshHealth: Effect.succeed(Option.none()),
+          snapshot: Effect.sync(daemonSnapshot),
+          stop: Effect.void,
+        };
+        const backendManager: DesktopBackendManagerShape = {
+          start: Effect.die("unexpected restart"),
+          stop: () => Effect.die("unexpected stop"),
+          currentConfig: Effect.succeed(Option.none()),
+          snapshot: Effect.succeed({
+            desiredRunning: true,
+            ready: true,
+            activePid: Option.some(process.pid),
+            restartAttempt: 0,
+            restartScheduled: false,
+          }),
+        };
+        const watchdog = yield* runProviderDaemonHealthWatchdog({
+          backendManager,
+          providerDaemonManager,
+          quitting,
+          checkInterval: Duration.millis(1),
+          isDaemonProcessAlive: () => {
+            throw new Error("forbidden PID fallback");
+          },
+        }).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust(Duration.millis(1));
+        yield* Effect.yieldNow;
+        yield* Fiber.interrupt(watchdog);
+        assert.equal(observations, 1);
+      }).pipe(Effect.provide(TestClock.layer())),
+    ),
+  );
+
   it.effect("preserves a live daemon across sustained liveness probe failures", () =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -4,6 +4,14 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
+    "./windowsProcessOwnership": {
+      "types": "./src/windowsProcessOwnership.ts",
+      "import": "./src/windowsProcessOwnership.ts"
+    },
+    "./windowsProviderRuntime": {
+      "types": "./src/windowsProviderRuntime.ts",
+      "import": "./src/windowsProviderRuntime.ts"
+    },
     "./providerUsageReset": {
       "types": "./src/providerUsageReset.ts",
       "import": "./src/providerUsageReset.ts"
