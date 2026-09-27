@@ -4,6 +4,11 @@ name: Reliability and dependency canaries
 # PR test graph. This workflow spends no provider tokens and reads no account
 # credentials: provider lifecycle cases use isolated synthetic runtimes.
 on:
+  workflow_call:
+    inputs:
+      windows_ownership_only:
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       windows_ownership_only:
