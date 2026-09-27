@@ -58,7 +58,10 @@ function fixture(
       done();
     },
   });
-  const kill = vi.fn(() => true);
+  const kill = vi.fn(() => {
+    queueMicrotask(() => events.emit("exit", 0));
+    return true;
+  });
   const child = Object.assign(events, {
     stdin,
     stdout,
@@ -110,6 +113,11 @@ describe("Windows process ownership protocol", () => {
     expect(args).toContain("-NonInteractive");
     expect(args.join(" ")).not.toContain("ExecutionPolicy");
     expect(args.join(" ").length).toBeLessThan(2_048);
+    const bootstrap = Buffer.from(args.at(-1)!, "base64").toString("utf16le");
+    expect(bootstrap.indexOf("InputEncoding")).toBeLessThan(
+      bootstrap.indexOf("[Console]::In.ReadLine"),
+    );
+    expect(fake.source()).not.toContain("[Console]::InputEncoding");
     expect(options).toMatchObject({
       shell: false,
       windowsHide: true,
@@ -321,5 +329,39 @@ describe("Windows process ownership protocol", () => {
       new WindowsOwnershipError("helper-unavailable"),
     );
     expect(fake.kill).toHaveBeenCalledOnce();
+  });
+
+  it("does not resolve session close until the helper actually exits after its ACK", async () => {
+    const fake = fixture((request, reply) => {
+      reply(request.op === "open" ? { opened: true } : { closed: true });
+    });
+    fake.kill.mockImplementation(() => true);
+    const session = await openWindowsOwnershipSession(sessionInput, fake.dependencies);
+    let closed = false;
+    const closing = session.close().then(() => {
+      closed = true;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(fake.requests.map((request) => request.op)).toEqual(["open", "close"]);
+    expect(closed).toBe(false);
+    // This event, not the preceding ACK, releases authority to open another
+    // role's guard. Tests simulate the native finalizer still running until now.
+    fake.events.emit("exit", 0);
+    await closing;
+    expect(closed).toBe(true);
+  });
+
+  it("fails closed when a helper acknowledges close but exit remains unconfirmed", async () => {
+    const fake = fixture((request, reply) => {
+      reply(request.op === "open" ? { opened: true } : { closed: true });
+    });
+    fake.kill.mockImplementation(() => true);
+    const session = await openWindowsOwnershipSession(sessionInput, {
+      ...fake.dependencies,
+      helperExitTimeoutMs: 5,
+    });
+    await expect(session.close()).rejects.toMatchObject({ reason: "helper-exit-unconfirmed" });
+    expect(fake.requests.map((request) => request.op)).toEqual(["open", "close"]);
+    fake.events.emit("exit", 0);
   });
 });

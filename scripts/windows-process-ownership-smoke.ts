@@ -211,6 +211,18 @@ export async function runWindowsProcessOwnershipSmoke(): Promise<void> {
     let started = performance.now();
     const captured = await captureWindowsProcessIdentity(child.pid);
     timing.coldCaptureMs = Math.round(performance.now() - started);
+    // Fixed native outcomes diagnose setup/policy failures without printing the
+    // helper's raw stdout/stderr, target command line, PID or filesystem paths.
+    console.info(
+      JSON.stringify({
+        phase: "native-capture",
+        status: captured.status,
+        ...(captured.status === "present" || captured.reason === undefined
+          ? {}
+          : { reason: captured.reason }),
+        durationMs: timing.coldCaptureMs,
+      }),
+    );
     assert.equal(
       captured.status,
       "present",

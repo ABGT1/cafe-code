@@ -12,7 +12,6 @@
 export const WINDOWS_PROCESS_OWNERSHIP_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 try {
 Add-Type -ReferencedAssemblies System.Web.Extensions -TypeDefinition @'

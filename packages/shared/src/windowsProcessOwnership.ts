@@ -18,6 +18,7 @@ export const WINDOWS_OWNERSHIP_REASONS = [
   "helper-unavailable",
   "helper-exited",
   "helper-timeout",
+  "helper-exit-unconfirmed",
   "session-closed",
   "access-denied",
   "native-failure",
@@ -79,6 +80,7 @@ export interface WindowsOwnershipSession {
 export const WINDOWS_OWNERSHIP_LIMITS = {
   operationTimeoutMs: 15_000,
   sessionTimeoutMs: 120_000,
+  helperExitTimeoutMs: 3_000,
   responseBytes: 8_192,
   requestBytes: 16_384,
   markerBytes: 4_096,
@@ -96,6 +98,7 @@ export interface WindowsOwnershipDependencies {
   ) => ChildProcessWithoutNullStreams;
   readonly operationTimeoutMs?: number;
   readonly sessionTimeoutMs?: number;
+  readonly helperExitTimeoutMs?: number;
 }
 
 type JsonObject = Record<string, unknown>;
@@ -211,6 +214,7 @@ function decodeSnapshot(value: unknown): WindowsOwnershipSnapshot {
 interface HelperTransport {
   request(input: JsonObject): Promise<unknown>;
   close(): void;
+  waitForExit(): Promise<void>;
 }
 
 function helperTransport(dependencies: WindowsOwnershipDependencies): HelperTransport {
@@ -234,8 +238,11 @@ function helperTransport(dependencies: WindowsOwnershipDependencies): HelperTran
   // Windows limits the entire command line to 32 KiB. The fixed bootstrap reads
   // the fixed helper source from stdin; subsequent lines carry structured data.
   // Neither script source nor private data requires a temporary .ps1 file.
+  // Set InputEncoding BEFORE the first Console.In access. Changing it inside
+  // the loaded script replaces Console's buffered reader and can discard the
+  // already-prefetched first JSON request, leaving native startup waiting forever.
   const bootstrap =
-    "& ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadLine()))))";
+    "[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false); & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadLine()))))";
   const args = [
     "-NoLogo",
     "-NoProfile",
@@ -272,6 +279,8 @@ function helperTransport(dependencies: WindowsOwnershipDependencies): HelperTran
       }
     | undefined;
   let closed = false;
+  let exited = false;
+  const exitWaiters = new Set<() => void>();
   let sequence = 0;
   let buffered = "";
   let queued: Promise<unknown> = Promise.resolve();
@@ -333,7 +342,15 @@ function helperTransport(dependencies: WindowsOwnershipDependencies): HelperTran
   // Drain but never retain/forward stderr (PowerShell may include private paths).
   child.stderr.on("data", () => undefined);
   child.on("error", () => abort("helper-unavailable"));
-  child.on("exit", () => abort("helper-exited"));
+  child.on("exit", () => {
+    // A close ACK is emitted before the native helper's finally block releases
+    // its guard. Only actual child exit proves every native handle was closed,
+    // so cross-role callers must await this before opening the other role.
+    exited = true;
+    for (const notify of exitWaiters) notify();
+    exitWaiters.clear();
+    abort("helper-exited");
+  });
   child.stdin.on("error", () => abort("helper-exited"));
   child.stdin.write(
     `${Buffer.from(WINDOWS_PROCESS_OWNERSHIP_SCRIPT, "utf8").toString("base64")}\n`,
@@ -369,6 +386,20 @@ function helperTransport(dependencies: WindowsOwnershipDependencies): HelperTran
       return request;
     },
     close: () => abort("session-closed"),
+    waitForExit() {
+      if (exited) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        const notify = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          exitWaiters.delete(notify);
+          reject(new WindowsOwnershipError("helper-exit-unconfirmed"));
+        }, dependencies.helperExitTimeoutMs ?? WINDOWS_OWNERSHIP_LIMITS.helperExitTimeoutMs);
+        exitWaiters.add(notify);
+      });
+    },
   };
 }
 
@@ -480,6 +511,10 @@ export async function openWindowsOwnershipSession(
         await transport.request({ op: "close" });
       } finally {
         transport.close();
+        // Never transfer authority to a different ownership guard solely from
+        // an ACK or a dispatched kill request. A bounded failure is uncertainty
+        // and must prevent that caller from continuing its cross-role action.
+        await transport.waitForExit();
       }
     },
   };
