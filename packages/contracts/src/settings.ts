@@ -638,7 +638,7 @@ export const CodexSettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "Shadow home path",
         description:
-          "Cafe Code Codex runtime home. Shares config/session files while keeping auth and runtime databases isolated.",
+          "Optional authentication overlay. Shares Codex configuration, conversation history, and SQLite state by default while keeping authentication in a private file. Use a direct home for separate conversation state.",
         providerSettingsForm: {
           placeholder: "~/.codex-cafecode/personal",
           clearWhenEmpty: "omit",

@@ -3347,6 +3347,143 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("redacts Claude plugin load errors before native and configured diagnostics", () => {
+    const nativeEvents: Array<{ event?: { method?: string; payload?: unknown } }> = [];
+    const harness = makeHarness({
+      nativeEventLogger: {
+        filePath: "memory://claude-plugin-diagnostics",
+        write: (event) => {
+          nativeEvents.push(event as (typeof nativeEvents)[number]);
+          return Effect.void;
+        },
+        close: () => Effect.void,
+      },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const configuredFiber = yield* Stream.filter(
+        adapter.streamEvents,
+        (event) =>
+          event.type === "session.configured" && event.raw?.method === "claude/system/init",
+      ).pipe(Stream.take(5), Stream.runCollect, Effect.forkChild);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "approval-required",
+      });
+
+      const secret = "must-not-persist-plugin-private-data";
+      const privateError = {
+        plugin: secret,
+        message: `${secret} bearer credential`,
+        path: `/private/${secret}/plugin`,
+        unknown: { credential: secret },
+      };
+      // Fixtures cover .283's open-set categories, malformed mixed-version
+      // input, a bounded large list, and legacy omission. No provider is run.
+      const diagnostics = [
+        {
+          plugin_errors: [
+            ...[
+              "path-not-found",
+              "manifest-validation-error",
+              "dependency-unsatisfied",
+              "hook-load-failed",
+              "generic-error",
+              `__proto__${secret}`,
+            ].map((type) => Object.assign({ type }, privateError)),
+            null,
+          ],
+        },
+        {
+          plugin_errors: Array.from({ length: 65 }, () => ({
+            ...privateError,
+            type: "generic-error",
+          })),
+        },
+        { plugin_errors: privateError },
+        { plugin_error_summary: { forged: secret } },
+        { plugin_errors: [] },
+      ];
+      for (const fields of diagnostics) {
+        harness.query.emit({
+          type: "system",
+          subtype: "init",
+          apiKeySource: "none",
+          claude_code_version: "2.1.283",
+          cwd: "/fixture",
+          tools: [],
+          mcp_servers: [],
+          model: "claude-sonnet-5",
+          permissionMode: "default",
+          slash_commands: [],
+          output_style: "default",
+          skills: [],
+          plugins: [],
+          uuid: "00000000-0000-4000-8000-000000000000",
+          session_id: "sdk-session-plugin-diagnostics",
+          ...fields,
+        } as SDKMessage);
+      }
+
+      const configuredEvents = Array.from(yield* Fiber.join(configuredFiber));
+      const nativePayloads = nativeEvents
+        .filter((record) => record.event?.method === "claude/system/init")
+        .map((record) => record.event?.payload as Record<string, unknown>);
+      assert.lengthOf(nativePayloads, diagnostics.length);
+      const expectedCategories = {
+        "path-not-found": 1,
+        "manifest-validation-error": 1,
+        "dependency-unsatisfied": 1,
+        "hook-load-failed": 1,
+        "generic-error": 2,
+        malformed: 1,
+        uninspected: 0,
+      };
+      for (const [index, event] of configuredEvents.entries()) {
+        assert.equal(event.type, "session.configured");
+        if (event.type !== "session.configured") continue;
+        const config = event.payload.config;
+        const native = nativePayloads[index];
+        const raw = event.raw?.payload as Record<string, unknown>;
+        for (const payload of [config, native, raw]) {
+          assert.notProperty(payload, "plugin_errors");
+          assert.notInclude(JSON.stringify(payload), secret);
+          assert.equal(payload?.model, "claude-sonnet-5");
+          assert.deepEqual(payload?.plugin_error_summary, config.plugin_error_summary);
+        }
+        const summary = config.plugin_error_summary as
+          | { count: number; categories: Record<string, number> }
+          | undefined;
+        if (index === 0) {
+          assert.deepEqual(summary, { count: 7, categories: expectedCategories });
+        } else if (index === 1) {
+          assert.equal(summary?.count, 65);
+          assert.equal(summary?.categories["generic-error"], 64);
+          assert.equal(summary?.categories.uninspected, 1);
+        } else if (index === 2) {
+          assert.equal(summary?.count, 1);
+          assert.equal(summary?.categories.malformed, 1);
+        } else if (index === 3) {
+          assert.notProperty(config, "plugin_error_summary");
+        } else {
+          assert.equal(summary?.count, 0);
+          assert.equal(
+            Object.values(summary?.categories ?? {}).every((count) => count === 0),
+            true,
+          );
+        }
+      }
+      assert.notInclude(JSON.stringify(configuredEvents), secret);
+      assert.notInclude(JSON.stringify(nativeEvents), secret);
+      assert.lengthOf(harness.query.interruptCalls, 0);
+      assert.equal(harness.query.closeCalls, 0);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("bounds provider-authored task and hook text in canonical and native records", () => {
     const nativeEvents: Array<{
       event?: {

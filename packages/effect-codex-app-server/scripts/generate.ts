@@ -23,10 +23,10 @@ import {
   parseRequestEntries,
 } from "./protocolMethodEntries.ts";
 
-// Codex 0.157.0 release commit. Keep generation attached to an immutable
+// Codex 0.157.1 release commit. Keep generation attached to an immutable
 // upstream commit rather than a moving tag so a reinstall cannot silently
 // change Cafe's protocol boundary.
-const UPSTREAM_REF = "00c972ed5d6ff6499317fd41b7f23605b8e6850d";
+const UPSTREAM_REF = "36650394c5b38c2990ccf2a3457165ca3e9d9726";
 const USER_AGENT = "effect-codex-app-server-generator";
 const GITHUB_API_BASE =
   "https://api.github.com/repos/openai/codex/contents/codex-rs/app-server-protocol";

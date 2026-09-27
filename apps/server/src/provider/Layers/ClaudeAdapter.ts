@@ -1302,6 +1302,67 @@ function boundedClaudeNativeSystemEnvelope(
   };
 }
 
+/**
+ * SDK 0.3.283 declares plugin_errors on init, including resolved local paths
+ * for failed directory plugins. Names, messages, paths and unknown fields are
+ * provider/plugin-controlled and must not enter durable configuration or logs.
+ * Keep only fixed categories and counts. The 64-row inspection ceiling bounds
+ * work on repeated init frames; the remaining count is explicitly uninspected.
+ * An omitted field remains omitted because older and remote emitters can omit
+ * plugin diagnostics even when a plugin did not load.
+ */
+function boundedClaudeInitPluginDiagnostics(
+  source: Readonly<Record<string, unknown>>,
+): Readonly<Record<string, unknown>> {
+  const {
+    plugin_errors: pluginErrors,
+    // This is Cafe-owned diagnostic metadata, never an upstream passthrough.
+    plugin_error_summary: _untrustedSummary,
+    ...diagnostic
+  } = source;
+  if (pluginErrors === undefined) return diagnostic;
+
+  const categories = {
+    "path-not-found": 0,
+    "manifest-validation-error": 0,
+    "dependency-unsatisfied": 0,
+    "hook-load-failed": 0,
+    "generic-error": 0,
+    malformed: 0,
+    uninspected: 0,
+  };
+  if (!Array.isArray(pluginErrors)) {
+    categories.malformed = 1;
+    return { ...diagnostic, plugin_error_summary: { count: 1, categories } };
+  }
+
+  const inspectedCount = Math.min(pluginErrors.length, 64);
+  for (let index = 0; index < inspectedCount; index += 1) {
+    const error = recordValue(pluginErrors[index]);
+    if (!error || typeof error.type !== "string") {
+      categories.malformed += 1;
+      continue;
+    }
+    // An open-set native category must never become an arbitrary object key.
+    // Unknown/new categories remain a generic failure until explicitly audited.
+    switch (error.type) {
+      case "path-not-found":
+      case "manifest-validation-error":
+      case "dependency-unsatisfied":
+      case "hook-load-failed":
+        categories[error.type] += 1;
+        break;
+      default:
+        categories["generic-error"] += 1;
+    }
+  }
+  categories.uninspected = pluginErrors.length - inspectedCount;
+  return {
+    ...diagnostic,
+    plugin_error_summary: { count: pluginErrors.length, categories },
+  };
+}
+
 function boundedClaudeNativeMessagePayload(message: SDKMessage): unknown {
   const source = message as unknown as Record<string, unknown>;
   if (source.type === "user") {
@@ -1356,6 +1417,8 @@ function boundedClaudeNativeMessagePayload(message: SDKMessage): unknown {
   if (source.type !== "system") return message;
 
   switch (source.subtype) {
+    case "init":
+      return boundedClaudeInitPluginDiagnostics(source);
     case "hook_started": {
       const hookId = boundedClaudeNativeIdentifier(source.hook_id, "hook-id");
       const hookName = boundedClaudeProviderText(source.hook_name, 256);
@@ -5529,7 +5592,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...base,
           type: "session.configured",
           payload: {
-            config: message as Record<string, unknown>,
+            config: boundedClaudeInitPluginDiagnostics(message as Record<string, unknown>),
           },
         });
         return;
