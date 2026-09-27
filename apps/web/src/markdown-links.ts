@@ -5,7 +5,7 @@ const WINDOWS_DRIVE_PATH_PATTERN = /^[A-Za-z]:[\\/]/;
 const WINDOWS_UNC_PATH_PATTERN = /^\\\\/;
 const EXTERNAL_SCHEME_PATTERN = /^([A-Za-z][A-Za-z0-9+.-]*):(.*)$/;
 const RELATIVE_PATH_PREFIX_PATTERN = /^(~\/|\.{1,2}\/)/;
-const RELATIVE_FILE_PATH_PATTERN = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+(?::\d+){0,2}$/;
+const RELATIVE_FILE_PATH_PATTERN = /^[A-Za-z0-9._() -]+(?:\/[A-Za-z0-9._() -]+)+(?::\d+){0,2}$/;
 const RELATIVE_FILE_NAME_PATTERN = /^[A-Za-z0-9._-]+\.[A-Za-z0-9_-]+(?::\d+){0,2}$/;
 const POSITION_SUFFIX_PATTERN = /:\d+(?::\d+)?$/;
 const POSITION_ONLY_PATTERN = /^\d+(?::\d+)?$/;
@@ -58,7 +58,10 @@ function stripSearchAndHash(value: string): { path: string; hash: string } {
 }
 
 function normalizeWindowsDrivePath(path: string): string {
-  return /^\/[A-Za-z]:[\\/]/.test(path) ? path.slice(1) : path;
+  const normalizedRoot = path.replace(/^\/?([A-Za-z]):[\\/]+/, "$1:/");
+  return /^[A-Za-z]:\//.test(normalizedRoot)
+    ? normalizedRoot.replaceAll("\\", "/")
+    : normalizedRoot;
 }
 
 function parseFileUrlHref(
@@ -204,7 +207,14 @@ export function resolveMarkdownFileLinkTarget(
   }
 
   if (!cwd) return null;
-  return resolvePathLinkTarget(pathWithPosition, cwd);
+  // `resolvePathLinkTarget` deliberately follows the host path style used by
+  // terminal links. Markdown links, however, are also emitted into an `href`.
+  // A Windows drive cwd written with forward slashes would otherwise produce
+  // a mixed value such as `C:/repo\\docs\\file.md`, which browsers preserve
+  // literally and the desktop shell cannot compare consistently. Normalize
+  // drive paths again after resolving the relative segment; UNC and POSIX
+  // paths retain their existing representation.
+  return normalizeWindowsDrivePath(resolvePathLinkTarget(pathWithPosition, cwd));
 }
 
 function basenameOfPath(path: string): string {

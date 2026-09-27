@@ -185,6 +185,157 @@ describe("ChatMarkdown", () => {
     }
   });
 
+  it("classifies angle-bracketed file links with spaces and parentheses", async () => {
+    showContextMenuMock.mockResolvedValueOnce("reveal");
+    const filePath = "C:/repo/review packets/assurance (final).md";
+    installDesktopCapabilityStub();
+    const screen = await render(
+      <ChatMarkdown
+        text="[assurance prompts](<C:/repo/review packets/assurance (final).md>)"
+        cwd="C:/repo"
+      />,
+    );
+
+    try {
+      const link = page.getByRole("link", { name: "assurance (final).md" });
+      await expect.element(link).toBeInTheDocument();
+
+      const linkElement = document.querySelector<HTMLAnchorElement>(".chat-markdown-file-link");
+      expect(linkElement).not.toBeNull();
+      linkElement!.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+          clientX: 21,
+          clientY: 43,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(showContextMenuMock).toHaveBeenCalledWith(
+          expect.arrayContaining([
+            expect.objectContaining({ id: "open", label: "Open in editor" }),
+            expect.objectContaining({
+              id: "reveal",
+              label: expect.stringMatching(/^Open in (Finder|Explorer|Files)$/),
+            }),
+          ]),
+          { x: 21, y: 43 },
+        );
+      });
+      await vi.waitFor(() => {
+        expect(revealPathMock).toHaveBeenCalledWith(filePath);
+      });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("classifies relative file links containing spaces and parentheses", async () => {
+    const filePath = "C:/repo/project/.cafe-code-link-smoke/folder with spaces/review (final).md";
+    installDesktopCapabilityStub();
+    const screen = await render(
+      <ChatMarkdown
+        text="[Relative path with spaces and parentheses](<.cafe-code-link-smoke/folder with spaces/review (final).md>)"
+        cwd="C:/repo/project"
+      />,
+    );
+
+    try {
+      const link = page.getByRole("link", { name: "review (final).md" });
+      await expect.element(link).toHaveAttribute("href", filePath);
+      await link.click();
+      await vi.waitFor(() => {
+        expect(openInPreferredEditorMock).toHaveBeenCalledWith(expect.anything(), filePath);
+      });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("preserves windows backslash separators that markdown would treat as escapes", async () => {
+    const filePath = "C:/repo/Example Project/.docs/runbooks/review-notes.md";
+    installDesktopCapabilityStub();
+    const screen = await render(
+      <ChatMarkdown
+        text={"[assurance prompts](<C:\\repo\\Example Project\\.docs\\runbooks\\review-notes.md>)"}
+        cwd="C:/repo/Example Project"
+      />,
+    );
+
+    try {
+      const link = page.getByRole("link", {
+        name: "review-notes.md",
+      });
+      await expect.element(link).toBeInTheDocument();
+      await expect.element(link).toHaveAttribute("href", filePath);
+      await link.click();
+
+      await vi.waitFor(() => {
+        expect(openInPreferredEditorMock).toHaveBeenCalledWith(expect.anything(), filePath);
+      });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it.each(["C:/repo", "/Users/example/repo", "/home/example/repo"])(
+    "uses the parsed destination for balanced parentheses under %s",
+    async (cwd) => {
+      const filePath = `${cwd}/review(final).md`;
+      installDesktopCapabilityStub();
+      const screen = await render(<ChatMarkdown text={`[Review](${filePath})`} cwd={cwd} />);
+      try {
+        const link = page.getByRole("link", { name: "review(final).md" });
+        await expect.element(link).toHaveAttribute("href", filePath);
+        await link.click();
+        await vi.waitFor(() => {
+          expect(openInPreferredEditorMock).toHaveBeenCalledWith(expect.anything(), filePath);
+        });
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
+
+  it("uses the parsed destination for reference-style file links", async () => {
+    installDesktopCapabilityStub();
+    const screen = await render(
+      <ChatMarkdown
+        text={"[Review][notes]\n\n[notes]: </home/example/repo/review (final).md>"}
+        cwd="/home/example/repo"
+      />,
+    );
+    try {
+      const link = page.getByRole("link", { name: "review (final).md" });
+      await expect.element(link).toHaveAttribute("href", "/home/example/repo/review (final).md");
+      await link.click();
+      await vi.waitFor(() => {
+        expect(openInPreferredEditorMock).toHaveBeenCalledWith(
+          expect.anything(),
+          "/home/example/repo/review (final).md",
+        );
+      });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("decodes Markdown punctuation escapes in POSIX destinations", async () => {
+    installDesktopCapabilityStub();
+    const screen = await render(
+      <ChatMarkdown
+        text={String.raw`[Review](/home/example/repo/review\_final.md)`}
+        cwd="/home/example/repo"
+      />,
+    );
+    try {
+      const link = page.getByRole("link", { name: "review_final.md" });
+      await expect.element(link).toHaveAttribute("href", "/home/example/repo/review_final.md");
+    } finally {
+      await screen.unmount();
+    }
+  });
   it("disambiguates duplicate file basenames inline", async () => {
     const firstPath = "/Users/yashsingh/p/t3code/apps/web/src/components/chat/MessagesTimeline.tsx";
     const secondPath = "/Users/yashsingh/p/t3code/apps/web/src/components/MessagesTimeline.tsx";
@@ -217,6 +368,34 @@ describe("ChatMarkdown", () => {
       await expect.element(link).toBeInTheDocument();
       await expect.element(link).toHaveAttribute("href", "https://openai.com/docs");
       await expect.element(link).toHaveAttribute("target", "_blank");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps document fragments inside the current view", async () => {
+    const screen = await render(
+      <ChatMarkdown text="[Smoke section](#smoke-test-section)" cwd="/repo/project" />,
+    );
+
+    try {
+      const link = page.getByRole("link", { name: "Smoke section" });
+      await expect.element(link).toHaveAttribute("href", "#smoke-test-section");
+      await expect.element(link).not.toHaveAttribute("target");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("renders sanitized unsafe link destinations as inert text", async () => {
+    const screen = await render(
+      <ChatMarkdown text="[Unsafe](javascript:alert(1))" cwd="/repo/project" />,
+    );
+
+    try {
+      await expect.element(page.getByText("Unsafe", { exact: true })).toBeInTheDocument();
+      expect(document.querySelector('a[href*="javascript"]')).toBeNull();
+      expect(document.querySelector('a[href=""]')).toBeNull();
     } finally {
       await screen.unmount();
     }

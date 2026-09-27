@@ -354,7 +354,8 @@ interface MarkdownFileLinkProps {
   className?: string | undefined;
 }
 
-const MARKDOWN_LINK_HREF_PATTERN = /\[[^\]]*]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g;
+const MARKDOWN_LINK_HREF_PATTERN =
+  /\[[^\]]*]\(\s*(?:<([^>\r\n]+)>|([^\s)]+))(?:\s+["'][^"']*["'])?\)/g;
 const MARKDOWN_FILE_LINK_CLASS_NAME =
   "chat-markdown-file-link relative top-[2px] max-w-full no-underline";
 const MARKDOWN_FILE_LINK_ICON_CLASS_NAME = "chat-markdown-file-link-icon size-3.5 shrink-0";
@@ -435,7 +436,7 @@ function buildFileLinkParentSuffixByPath(filePaths: ReadonlyArray<string>): Map<
 function extractMarkdownLinkHrefs(text: string): string[] {
   const hrefs: string[] = [];
   for (const match of text.matchAll(MARKDOWN_LINK_HREF_PATTERN)) {
-    const href = match[1]?.trim();
+    const href = (match[1] ?? match[2])?.trim();
     if (!href) continue;
     hrefs.push(href);
   }
@@ -703,10 +704,38 @@ function ChatMarkdown({
       li({ node: _node, children, ...props }) {
         return <li {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</li>;
       },
-      a({ node: _node, href, ...props }) {
+      a({ node, href, ...props }) {
         const normalizedHref = href ? normalizeMarkdownLinkHrefKey(href) : "";
-        const fileLinkMeta = normalizedHref ? markdownFileLinkMetaByHref.get(normalizedHref) : null;
+        const sourceHref =
+          node?.position?.start.offset !== undefined && node.position.end.offset !== undefined
+            ? extractMarkdownLinkHrefs(
+                normalizedText.slice(node.position.start.offset, node.position.end.offset),
+              )[0]
+            : undefined;
+        // Only Windows drive paths need literal source backslashes restored.
+        // Other links must keep Markdown's parsed destination: the pre-scan
+        // is not a parser and can truncate balanced parentheses or retain escapes.
+        const normalizedSourceHref =
+          sourceHref && /^\/?[A-Za-z]:[\\/]/.test(sourceHref) && sourceHref.includes("\\")
+            ? normalizeMarkdownLinkHrefKey(sourceHref)
+            : "";
+        const fileLinkMeta =
+          (normalizedSourceHref
+            ? markdownFileLinkMetaByHref.get(normalizedSourceHref)
+            : undefined) ??
+          (normalizedSourceHref
+            ? resolveMarkdownFileLinkMeta(normalizedSourceHref, cwd, additionalWorkspaceRoots)
+            : null) ??
+          (normalizedHref
+            ? resolveMarkdownFileLinkMeta(normalizedHref, cwd, additionalWorkspaceRoots)
+            : null);
         if (!fileLinkMeta) {
+          if (!href) {
+            return <span className={props.className}>{props.children}</span>;
+          }
+          if (href.startsWith("#")) {
+            return <a {...props} href={href} />;
+          }
           return <a {...props} href={href} target="_blank" rel="noopener noreferrer" />;
         }
 
@@ -764,10 +793,13 @@ function ChatMarkdown({
       },
     }),
     [
+      additionalWorkspaceRoots,
+      cwd,
       diffThemeName,
       fileLinkParentSuffixByPath,
       isStreaming,
       markdownFileLinkMetaByHref,
+      normalizedText,
       resolvedTheme,
       skills,
     ],

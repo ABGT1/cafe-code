@@ -5,6 +5,7 @@ import {
   useLocalStorage,
 } from "./hooks/useLocalStorage";
 import { useMemo } from "react";
+import { splitPathAndPosition } from "./path-links";
 
 const LAST_EDITOR_KEY = "cafe-code:last-editor";
 const LEGACY_LAST_EDITOR_KEY = "cafecode:last-editor";
@@ -35,7 +36,17 @@ export function resolveAndPersistPreferredEditor(
 }
 
 export async function openInPreferredEditor(api: LocalApi, targetPath: string): Promise<EditorId> {
-  const { availableEditors } = await api.server.getConfig();
+  const { availableEditors, clientSettings } = await api.server.getConfig();
+  if (clientSettings.defaultEditor === "system-default") {
+    await api.shell.openPath(splitPathAndPosition(targetPath).path);
+    return "file-manager";
+  }
+
+  if (availableEditors.includes(clientSettings.defaultEditor)) {
+    await api.shell.openInEditor(targetPath, clientSettings.defaultEditor);
+    return clientSettings.defaultEditor;
+  }
+
   const editor = resolveAndPersistPreferredEditor(availableEditors);
   if (!editor) throw new Error("No available editors found.");
   await api.shell.openInEditor(targetPath, editor);

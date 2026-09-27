@@ -38,4 +38,13 @@ describe("formatWorkspaceRelativePath", () => {
       ),
     ).toBe("t3code/apps/web/src/session-logic.ts:501:9");
   });
+
+  it("does not prefix outside absolute windows paths as workspace-relative", () => {
+    expect(
+      formatWorkspaceRelativePath(
+        "C:/Users/mike/other/project/readme.md",
+        "C:/Users/mike/dev-stuff/t3code",
+      ),
+    ).toBe("C:/Users/mike/other/project/readme.md");
+  });
 });

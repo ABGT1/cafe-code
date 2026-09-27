@@ -48,6 +48,15 @@ describe("resolveMarkdownFileLinkTarget", () => {
     );
   });
 
+  it("resolves relative file paths containing spaces and parentheses", () => {
+    const href = ".cafe-code-link-smoke/folder with spaces/review (final).md";
+    const cwd = "C:/repo/project";
+
+    expect(resolveMarkdownFileLinkTarget(href, cwd)).toBe(
+      "C:/repo/project/.cafe-code-link-smoke/folder with spaces/review (final).md",
+    );
+  });
+
   it("does not treat filename line references as external schemes", () => {
     expect(resolveMarkdownFileLinkTarget("script.ts:10", "/Users/julius/project")).toBe(
       "/Users/julius/project/script.ts:10",
@@ -105,6 +114,29 @@ describe("resolveMarkdownFileLinkTarget", () => {
         "/D:/Programme/t3code/apps/web/src/components/chat/OpenInPicker.tsx#L69",
       ),
     ).toBe("D:/Programme/t3code/apps/web/src/components/chat/OpenInPicker.tsx:69");
+  });
+
+  it("normalizes mixed separators at a windows drive root before resolving", () => {
+    const malformedPath = "C:/\\repo\\Example Project.docs\\runbooks\\review-notes.md";
+
+    expect(resolveMarkdownFileLinkTarget(malformedPath, "C:/repo/Example Project.docs")).toBe(
+      "C:/repo/Example Project.docs/runbooks/review-notes.md",
+    );
+    expect(
+      resolveMarkdownFileLinkMeta(malformedPath, "C:/repo/Example Project.docs"),
+    ).toMatchObject({
+      displayPath: "Example Project.docs/runbooks/review-notes.md",
+      openPolicy: "direct",
+    });
+  });
+
+  it("normalizes separators after resolving a relative path against a windows drive cwd", () => {
+    expect(
+      resolveMarkdownFileLinkTarget(
+        ".cafe-code-link-smoke/folder with spaces/review (final).md",
+        "C:/repo/project",
+      ),
+    ).toBe("C:/repo/project/.cafe-code-link-smoke/folder with spaces/review (final).md");
   });
 
   it("resolves angle-bracketed windows drive paths", () => {
