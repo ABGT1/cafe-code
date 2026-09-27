@@ -114,13 +114,20 @@ public static class CafeWindowsOwnership {
     }
   }
 
-  static string FullPath(string path) {
+  static void RequirePathSpelling(string path) {
     if (path == null || path.Length > 1024 || path.Length < 4 || !char.IsLetter(path[0]) || path[1] != ':' || path[2] != '\\' || path.IndexOf(':', 2) >= 0 || path.IndexOf('\0') >= 0) Fail("unsafe-path");
-    string full = Path.GetFullPath(path);
-    if (!String.Equals(full, path, StringComparison.OrdinalIgnoreCase)) Fail("unsafe-path");
     foreach (string part in path.Substring(3).Split('\\')) {
       if (part.Length == 0 || part.EndsWith(".") || part.EndsWith(" ")) Fail("unsafe-path");
     }
+  }
+  static string FullPath(string path) {
+    RequirePathSpelling(path);
+    string full = Path.GetFullPath(path);
+    RequirePathSpelling(full);
+    // .NET Framework expands existing 8.3 aliases (including Windows TEMP's
+    // RUNNER~1 spelling). Canonicalize rather than confusing a safe OS alias
+    // with traversal. Both spellings reject dot/empty/trailing-dot components;
+    // every canonical ancestor is still opened and checked for reparse points.
     return full;
   }
   static void HoldDirectory(string path) {
@@ -130,9 +137,10 @@ public static class CafeWindowsOwnership {
     // junctions/symlinks. Omitting FILE_SHARE_DELETE pins each ancestor against
     // rename/replacement for the complete ownership transaction.
     SafeFileHandle handle = CreateFile(path, 0, 3, IntPtr.Zero, OpenExisting, Backup | OpenReparse, IntPtr.Zero);
-    if (handle.IsInvalid) { handle.Dispose(); Fail("unsafe-path"); }
+    if (handle.IsInvalid) { handle.Dispose(); Fail("unsafe-directory-open"); }
     FileInfo info;
-    if (!GetFileInformationByHandle(handle, out info) || (info.Attributes & Reparse) != 0 || (info.Attributes & Directory) == 0) { handle.Dispose(); Fail("unsafe-path"); }
+    if (!GetFileInformationByHandle(handle, out info) || (info.Attributes & Directory) == 0) { handle.Dispose(); Fail("unsafe-directory-metadata"); }
+    if ((info.Attributes & Reparse) != 0) { handle.Dispose(); Fail("unsafe-directory-reparse"); }
     Directories.Add(handle);
   }
   static SafeFileHandle OpenRecord(string path, uint access, uint share, uint disposition) {
@@ -166,7 +174,7 @@ public static class CafeWindowsOwnership {
     return value != null && Guid.TryParseExact(value, "D", out parsed) && parsed.ToString("D") == value && parsed != Guid.Empty;
   }
   static string CredentialFor(Dictionary<string,object> marker) {
-    string path = Text(marker,"credentialPath") ?? Credential;
+    string path = FullPath(Text(marker,"credentialPath") ?? Credential);
     string generation = Text(marker,"windowsOwnershipId");
     if (!String.Equals(path, Credential, StringComparison.OrdinalIgnoreCase) && !(IsGeneration(generation) && String.Equals(path, Credential + "." + generation, StringComparison.OrdinalIgnoreCase))) Fail("unsafe-path");
     return path;
