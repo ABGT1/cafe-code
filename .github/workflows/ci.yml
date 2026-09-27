@@ -2,6 +2,11 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      windows_ownership_only:
+        description: Run isolated Windows ownership and packaged-runtime qualification
+        type: boolean
+        default: false
   pull_request:
     branches:
       - dev
@@ -15,7 +20,16 @@ env:
   COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
 
 jobs:
+  windows-ownership-qualification:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.windows_ownership_only }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/reliability.yml
+    with:
+      windows_ownership_only: true
+
   quality:
+    if: ${{ !inputs.windows_ownership_only }}
     name: Quality (${{ matrix.os }})
     strategy:
       fail-fast: false

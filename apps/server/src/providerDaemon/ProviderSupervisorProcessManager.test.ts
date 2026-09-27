@@ -14,12 +14,35 @@ import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
+import type {
+  WindowsProviderRuntime,
+  WindowsProviderRuntimeOptions,
+  WindowsProviderRuntimeResult,
+} from "@cafecode/shared/windowsProviderRuntime";
+import { WindowsProviderRuntimeError } from "@cafecode/shared/windowsProviderRuntime";
 
 import { deriveServerPaths, ensureServerDirectories, type ServerConfigShape } from "../config.ts";
 import { ensureProviderSupervisorProcess } from "./ProviderSupervisorProcessManager.ts";
 
 const TEST_TOKEN = "provider-supervisor-test-token-0000000000000000000000";
 const TEST_RUNTIME_BUILD_ID = "provider-supervisor-runtime-build-test";
+const TEST_WINDOWS_OWNERSHIP_ID = "9a90b48d-868f-4614-ae9c-66d50293d52b";
+
+function fakeWindowsRuntime(ensure: WindowsProviderRuntime["ensure"]): WindowsProviderRuntime {
+  return {
+    ensure,
+    observe: async () => {
+      throw new Error("unexpected observe");
+    },
+    stop: async () => {
+      throw new Error("unexpected stop");
+    },
+    recover: async () => {
+      throw new Error("unexpected recover");
+    },
+    current: () => null,
+  };
+}
 
 const encodeProviderDaemonHealthJson = Schema.encodeSync(
   Schema.fromJsonString(ProviderDaemonHealth),
@@ -186,11 +209,19 @@ describe("ProviderSupervisorProcessManager", () => {
         })}\n`,
       );
 
-      const supervisor = yield* ensureProviderSupervisorProcess({
-        config,
-        version: "0.0.0-test",
-        runtimeBuildId: TEST_RUNTIME_BUILD_ID,
-      });
+      const supervisor = yield* ensureProviderSupervisorProcess(
+        {
+          config,
+          version: "0.0.0-test",
+          runtimeBuildId: TEST_RUNTIME_BUILD_ID,
+        },
+        {
+          platform: "linux",
+          createWindowsRuntime: () => {
+            throw new Error("POSIX must not create a Windows controller");
+          },
+        },
+      );
 
       assert.equal(supervisor.endpoint.httpBaseUrl, httpBaseUrl);
       assert.equal(
@@ -206,6 +237,199 @@ describe("ProviderSupervisorProcessManager", () => {
       assert.equal(supervisor.snapshot.health.protocolVersion, 1);
       assert.equal(supervisor.snapshot.health.activeSessionCount, 2);
       assert.equal(supervisor.snapshot.health.configuredInstanceCount, 3);
+      assert.isFalse("windowsProcessIdentity" in supervisor.snapshot);
+      assert.isFalse("windowsOwnershipId" in supervisor.snapshot);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "routes Windows supervisor ownership through the fenced runtime without legacy cleanup",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "cafe-windows-supervisor-",
+        });
+        const config = yield* makeServerConfig(baseDir);
+        const markerPath = path.join(config.stateDir, "provider-supervisor.json");
+        const credentialPath = path.join(config.secretsDir, "provider-supervisor-token");
+        // Invalid ownership is deliberately present: the old Windows path turned
+        // this into absence and spawned another process. Only the injected fenced
+        // controller now receives authority to interpret it; this wrapper does not.
+        yield* fileSystem.writeFileString(markerPath, "inconclusive record");
+        yield* fileSystem.writeFileString(credentialPath, "retained synthetic credential");
+        for (const privateFailure of [
+          "access denied",
+          "bad credential token=private-value",
+          "helper died after mutation",
+        ]) {
+          let ensureCalls = 0;
+          const outcome = yield* ensureProviderSupervisorProcess(
+            { config, version: "0.0.0-test" },
+            {
+              platform: "win32",
+              createWindowsRuntime: () =>
+                fakeWindowsRuntime(async () => {
+                  ensureCalls += 1;
+                  throw new Error(privateFailure);
+                }),
+              spawnWindowsChild: async () => {
+                throw new Error("must not spawn outside ownership controller");
+              },
+            },
+          ).pipe(Effect.result);
+          assert.equal(outcome._tag, "Failure");
+          if (outcome._tag === "Failure") {
+            assert.equal(
+              outcome.failure.message,
+              "Windows supervisor ownership: Provider supervisor ownership could not be verified. Existing processes and ownership records were preserved.",
+            );
+            assert.isFalse(outcome.failure.message.includes(privateFailure));
+          }
+          assert.equal(ensureCalls, 1);
+          assert.equal(yield* fileSystem.readFileString(markerPath), "inconclusive record");
+          assert.equal(
+            yield* fileSystem.readFileString(credentialPath),
+            "retained synthetic credential",
+          );
+        }
+        const legacyError = new WindowsProviderRuntimeError("legacy-identity-unknown");
+        legacyError.message = "private mutated exception details";
+        const legacyOutcome = yield* ensureProviderSupervisorProcess(
+          { config, version: "0.0.0-test" },
+          {
+            platform: "win32",
+            createWindowsRuntime: () =>
+              fakeWindowsRuntime(async () => {
+                throw legacyError;
+              }),
+          },
+        ).pipe(Effect.result);
+        assert.equal(legacyOutcome._tag, "Failure");
+        if (legacyOutcome._tag === "Failure") {
+          assert.include(legacyOutcome.failure.message, "guided legacy recovery");
+          assert.notInclude(legacyOutcome.failure.message, "private mutated");
+        }
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "configures Windows supervisor generation, private bootstrap and plaintext credential policy",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "cafe-windows-supervisor-config-",
+        });
+        const config = yield* makeServerConfig(baseDir);
+        const health = {
+          ok: true,
+          mode: "provider-supervisor",
+          pid: 27,
+          ppid: 1,
+          version: "0.0.0-test",
+          protocolVersion: 1,
+          startedAt: "2026-09-27T00:00:00.000Z",
+          activeSessionCount: 0,
+          configuredInstanceCount: 0,
+          eventCursor: 0,
+          windowsOwnershipId: TEST_WINDOWS_OWNERSHIP_ID,
+          windowsProcessIdentity: { pid: 27, creationTime100ns: "134348901321234567" },
+        } as const;
+        const endpoint = {
+          httpBaseUrl: "http://provider-supervisor.local",
+          transport: "ipc",
+          socketPath: "\\\\.\\pipe\\synthetic",
+          token: TEST_TOKEN,
+          leaseId: "synthetic-lease-00000000",
+        } as const;
+        const result = {
+          endpoint,
+          rootEndpoint: endpoint,
+          health,
+          adopted: true,
+          ownershipId: TEST_WINDOWS_OWNERSHIP_ID,
+          marker: {
+            version: 2,
+            mode: "provider-supervisor",
+            pid: 27,
+            httpBaseUrl: endpoint.httpBaseUrl,
+            credentialPath: path.join(
+              config.secretsDir,
+              `provider-supervisor-token.${TEST_WINDOWS_OWNERSHIP_ID}`,
+            ),
+            createdAt: health.startedAt,
+            updatedAt: health.startedAt,
+            appVersion: "0.0.0-test",
+            windowsOwnershipId: TEST_WINDOWS_OWNERSHIP_ID,
+            windowsProcessIdentity: health.windowsProcessIdentity,
+            windowsOwnershipState: "committed",
+          },
+        } satisfies WindowsProviderRuntimeResult;
+        let configured: WindowsProviderRuntimeOptions | undefined;
+        let spawnCalls = 0;
+        const supervisor = yield* ensureProviderSupervisorProcess(
+          { config, version: "0.0.0-test", runtimeBuildId: TEST_RUNTIME_BUILD_ID },
+          {
+            platform: "win32",
+            createWindowsRuntime: (options) => {
+              configured = options;
+              return fakeWindowsRuntime(async () => result);
+            },
+            spawnWindowsChild: async (options) => {
+              spawnCalls += 1;
+              assert.equal(options.bootstrap.mode, "provider-supervisor");
+              assert.equal(options.bootstrap.windowsOwnershipId, TEST_WINDOWS_OWNERSHIP_ID);
+              assert.equal(options.bootstrap.token, TEST_TOKEN);
+              assert.equal(options.env.ELECTRON_RUN_AS_NODE, "1");
+              assert.equal(options.env.CAFE_CODE_MODE, undefined);
+              assert.equal(options.cwd, config.cwd);
+              return { pid: 27, hasExited: () => false };
+            },
+          },
+        );
+        assert.equal(supervisor.snapshot.pid, 27);
+        assert.equal(supervisor.snapshot.adoptedExistingProcess, true);
+        assert.deepEqual(supervisor.snapshot.windowsProcessIdentity, health.windowsProcessIdentity);
+        assert.equal(supervisor.snapshot.windowsOwnershipId, TEST_WINDOWS_OWNERSHIP_ID);
+        assert.equal(supervisor.snapshot.credentialPath, result.marker.credentialPath);
+        assert.equal(supervisor.endpoint, endpoint);
+        assert.equal(spawnCalls, 0);
+        assert.ok(configured);
+        assert.equal(configured.role, "provider-supervisor");
+        // Windows must retain shared absolute deadlines/byte limits instead of
+        // overriding them with the legacy POSIX idle-timeout HTTP helpers.
+        assert.isUndefined(configured.fetchHealth);
+        assert.isUndefined(configured.issueLease);
+        assert.equal(configured.markerPath, path.join(config.stateDir, "provider-supervisor.json"));
+        assert.equal(
+          configured.legacyCredentialPath,
+          path.join(config.secretsDir, "provider-supervisor-token"),
+        );
+        assert.isTrue(
+          configured.socketPath.startsWith("\\\\.\\pipe\\cafecode-provider-supervisor-"),
+        );
+        const encoded = yield* Effect.promise(() => configured!.encodeCredential(TEST_TOKEN));
+        assert.equal(encoded.encrypted, false);
+        assert.equal(
+          yield* Effect.promise(() => configured!.decodeCredential(encoded.base64, false)),
+          TEST_TOKEN,
+        );
+        const invalidCredential = yield* Effect.tryPromise(() =>
+          configured!.decodeCredential(encoded.base64, true),
+        ).pipe(Effect.result);
+        assert.equal(invalidCredential._tag, "Failure");
+        yield* Effect.promise(() =>
+          configured!.spawn({
+            ...configured!.bootstrap,
+            mode: "provider-supervisor",
+            transport: "ipc",
+            socketPath: configured!.socketPath,
+            token: TEST_TOKEN,
+            windowsOwnershipId: TEST_WINDOWS_OWNERSHIP_ID,
+          }),
+        );
+        assert.equal(spawnCalls, 1);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });

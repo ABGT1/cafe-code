@@ -31,7 +31,10 @@ import {
   type ProviderRuntimeEvent as ProviderRuntimeEventValue,
   type ProviderRuntimeProcessMode,
   type ThreadId,
+  WindowsProcessIdentity,
+  WindowsOwnershipId,
 } from "@cafecode/contracts";
+import { captureWindowsProcessIdentity } from "@cafecode/shared/windowsProcessOwnership";
 import { PROVIDER_PIPELINE_POLICY, utf8ByteLength } from "@cafecode/shared/providerPipelinePolicy";
 import {
   addProviderDaemonStreamDiagnostics,
@@ -89,6 +92,8 @@ import { ProviderRuntimeInventory } from "./ProviderRuntimeInventory.ts";
 import { purgeProviderDaemonThreadPersistence } from "./ProviderDaemonThreadPurge.ts";
 
 const decodeDesktopInternalRequest = Schema.decodeUnknownSync(DesktopInternalRequest);
+const decodeWindowsOwnershipId = Schema.decodeUnknownSync(WindowsOwnershipId);
+const decodeWindowsProcessIdentity = Schema.decodeUnknownSync(WindowsProcessIdentity);
 const MAX_RPC_BODY_BYTES = 5 * 1024 * 1024;
 const PROVIDER_DAEMON_EVENT_JOURNAL_CAPACITY = 50_000;
 const PROVIDER_DAEMON_HEALTH_EVENT_DIAGNOSTICS_WINDOW = 100;
@@ -149,10 +154,57 @@ export interface ProviderDaemonServerOptions {
   readonly token: string;
   readonly version: string;
   readonly runtimeBuildId?: string;
+  readonly windowsOwnershipId?: string;
   readonly protocolVersion?: number;
   readonly supervisorProcess?: ProviderDaemonSupervisorProcess;
   /** Optional in-process observability hook used after an event is durably journaled. */
   readonly onRuntimeEventJournaled?: ((event: ProviderRuntimeEventValue) => void) | undefined;
+}
+
+export interface ProviderDaemonProcessIdentityDependencies {
+  readonly platform?: NodeJS.Platform;
+  readonly capture?: typeof captureWindowsProcessIdentity;
+}
+
+/**
+ * Capture this child's own native identity once, before opening its endpoint.
+ * The capability-authenticated response binds that identity to the private
+ * bootstrap generation. A parent-side lookup of the child's PID alone cannot
+ * provide that proof: the original child may already have exited and the OS
+ * may have reused its PID. Never turn a helper failure into guessed identity.
+ */
+export async function captureProviderDaemonProcessIdentity(
+  windowsOwnershipId: string | undefined,
+  dependencies: ProviderDaemonProcessIdentityDependencies = {},
+): Promise<{
+  readonly windowsProcessIdentity?: WindowsProcessIdentity;
+  readonly windowsOwnershipId?: string;
+}> {
+  if ((dependencies.platform ?? process.platform) !== "win32") return {};
+  try {
+    if (windowsOwnershipId !== undefined) {
+      decodeWindowsOwnershipId(windowsOwnershipId);
+    }
+    const result = await (dependencies.capture ?? captureWindowsProcessIdentity)(process.pid);
+    if (result.status === "present") {
+      const identity = decodeWindowsProcessIdentity(result.identity);
+      if (identity.pid === process.pid) {
+        return {
+          windowsProcessIdentity: identity,
+          ...(windowsOwnershipId === undefined ? {} : { windowsOwnershipId }),
+        };
+      }
+    }
+  } catch {
+    // Raw helper/decoder errors can contain private process or filesystem
+    // material. Startup exposes only this fixed, non-retry-authorizing error.
+  }
+  if (windowsOwnershipId !== undefined) {
+    throw new Error("Windows provider runtime could not verify its own process identity.");
+  }
+  // An old launcher has no generation to bind. Preserve legacy compatibility;
+  // its owner must remain conservative if authenticated migration is impossible.
+  return {};
 }
 
 export interface ProviderDaemonServerSnapshot {
@@ -1190,6 +1242,7 @@ const closeHttpServer = (server: http.Server): Effect.Effect<void> =>
 
 export const runProviderDaemonServer = (
   options: ProviderDaemonServerOptions,
+  identityDependencies: ProviderDaemonProcessIdentityDependencies = {},
 ): Effect.Effect<
   ProviderDaemonServerSnapshot,
   never,
@@ -1201,6 +1254,11 @@ export const runProviderDaemonServer = (
   | SqlClient.SqlClient
 > =>
   Effect.gen(function* () {
+    const processIdentity = yield* Effect.tryPromise({
+      try: () =>
+        captureProviderDaemonProcessIdentity(options.windowsOwnershipId, identityDependencies),
+      catch: () => new Error("Windows provider runtime could not verify its own process identity."),
+    }).pipe(Effect.orDie);
     installProviderDaemonProcessDiagnosticListeners();
     startProviderPipelineEventLoopMonitor();
 
@@ -1500,6 +1558,7 @@ export const runProviderDaemonServer = (
               : {}),
             startedAt,
             transport,
+            ...processIdentity,
           });
           return;
         }
@@ -1542,6 +1601,7 @@ export const runProviderDaemonServer = (
                   ? { runtimeBuildId: options.runtimeBuildId }
                   : {}),
                 startedAt,
+                ...processIdentity,
                 activeSessionCount: sessions.length,
                 configuredInstanceCount: inventorySnapshot.configuredInstanceCount,
                 eventCursor: journalSnapshot.eventCursor,

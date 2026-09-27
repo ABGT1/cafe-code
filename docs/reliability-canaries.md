@@ -17,6 +17,31 @@ schedule. The normal release merge should promote the workflow unchanged.
   the existing runtime self-test and authenticated backend/renderer readiness
   checks, then clean up only test-owned processes and files.
 
+Windows daemon ownership qualification additionally runs the explicit
+`node scripts/windows-process-ownership-smoke.ts` command on a disposable
+Windows runner before building its artifact. It uses private temporary records,
+synthetic credentials and self-expiring test children, not a user's Cafe profile.
+It verifies wrong-birth refusal, same-handle termination, exclusive guards,
+generation-fenced publication/retirement, helper death and lost-reply recovery.
+The packaged smoke also requires authenticated Windows process identity and
+bootstrap-generation metadata from its isolated daemon. See the
+[ownership decision](decisions/windows-daemon-process-identity.md) and the
+Windows-specific notes in `AGENTS.md` for safety and rollout limitations.
+
+For a review branch, the existing CI manual dispatcher accepts
+`windows_ownership_only=true` and calls just that Windows canary lane at the
+selected ref. For example:
+
+```sh
+gh workflow run ci.yml --ref <review-branch> -f windows_ownership_only=true
+```
+
+This explicit qualification does not replace normal push/PR checks or change
+their platform matrix. Scheduled reliability runs retain all three packaged
+platforms against `dev`. Native logs record actual OS/runner/PowerShell versions,
+fixed outcomes, helper/lock digests and timings; never credential contents or
+private record bodies.
+
 Run the credential-free process checks locally with the pinned toolchain:
 
 ```sh
@@ -34,5 +59,8 @@ runner or its existing explicit local opt-in.
 Failure triage should distinguish readiness, provider ownership, event journal
 durability, canonical ingestion, accounting settlement and renderer delivery.
 Retry only bounded, idempotent infrastructure observations or the exact storage
-write. Never resend an inference prompt merely because its acknowledgement was
-lost.
+write when its owner explicitly guarantees replay safety. Windows ownership
+publication and retirement are not replayable after an ambiguous response:
+reacquire the native guard and re-observe the durable generation before deciding
+the next action, even when the proposed bytes are identical. Never resend an
+inference prompt merely because its acknowledgement was lost.

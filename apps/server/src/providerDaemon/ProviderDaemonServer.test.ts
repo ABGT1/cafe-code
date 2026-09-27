@@ -1,5 +1,6 @@
 import {
   EventId,
+  PROVIDER_DAEMON_HEALTH_PATH,
   PROVIDER_DAEMON_LIVENESS_PATH,
   ProviderDaemonHealth,
   ProviderDaemonLeaseRequest,
@@ -40,10 +41,12 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { ProviderSupervisorRegistryLive } from "../providerSupervisor/ProviderSupervisorRegistry.ts";
 import {
   captureProviderDaemonProcessDiagnostic,
+  captureProviderDaemonProcessIdentity,
   handleProviderDaemonEventStream,
   runProviderDaemonServer,
   writeProviderDaemonStreamLine,
   type ProviderDaemonServerOptions,
+  type ProviderDaemonProcessIdentityDependencies,
 } from "./ProviderDaemonServer.ts";
 import type { ProviderDaemonPersistentEventJournal } from "./EventJournal.ts";
 import { ProviderRuntimeInventoryLocalLive } from "./ProviderRuntimeInventory.ts";
@@ -88,8 +91,11 @@ function makeDaemonRecord(cursor: number): ProviderDaemonEventRecord {
 
 const startProviderDaemonServerOnEphemeralPort = (
   options: Omit<ProviderDaemonServerOptions, "port">,
+  identityDependencies: ProviderDaemonProcessIdentityDependencies = { platform: "linux" },
 ) =>
-  runProviderDaemonServer({ ...options, port: 0 }).pipe(
+  // Default unit tests never launch an OS identity helper, including on Windows.
+  // Windows authority tests below inject deterministic native observations.
+  runProviderDaemonServer({ ...options, port: 0 }, identityDependencies).pipe(
     Effect.map((snapshot) => {
       if (snapshot.port === null) {
         throw new Error("Expected provider daemon test server to bind a TCP port.");
@@ -154,6 +160,87 @@ const makeProviderDaemonServerTestLayer = (providerService: ProviderServiceShape
 const providerDaemonServerTestLayer = makeProviderDaemonServerTestLayer(mockProviderService);
 
 describe("ProviderDaemonServer", () => {
+  it("fails closed for generation-bound Windows self-capture but preserves legacy/POSIX startup", async () => {
+    const windowsOwnershipId = "9a90b48d-868f-4614-ae9c-66d50293d52b";
+    const privateError = "private credential or profile content";
+    for (const capture of [
+      async () => ({ status: "unknown" as const }),
+      async () => ({ status: "exited" as const }),
+      async () => {
+        throw new Error(privateError);
+      },
+      async () => ({
+        status: "present" as const,
+        identity: { pid: process.pid + 1, creationTime100ns: "1" },
+      }),
+    ]) {
+      await expect(
+        captureProviderDaemonProcessIdentity(windowsOwnershipId, { platform: "win32", capture }),
+      ).rejects.toThrow("Windows provider runtime could not verify its own process identity.");
+      assert.deepEqual(
+        await captureProviderDaemonProcessIdentity(undefined, { platform: "win32", capture }),
+        {},
+      );
+      for (const platform of ["darwin", "linux"] as const) {
+        let calls = 0;
+        assert.deepEqual(
+          await captureProviderDaemonProcessIdentity(windowsOwnershipId, {
+            platform,
+            capture: async () => {
+              calls += 1;
+              return capture();
+            },
+          }),
+          {},
+        );
+        assert.equal(calls, 0);
+      }
+    }
+  });
+
+  it.effect(
+    "binds authenticated health and database-free liveness to a single cached Windows self-capture",
+    () => {
+      let captureCount = 0;
+      const windowsOwnershipId = "9a90b48d-868f-4614-ae9c-66d50293d52b";
+      const identity = { pid: process.pid, creationTime100ns: "134348901321234567" };
+      return Effect.gen(function* () {
+        const port = yield* startProviderDaemonServerOnEphemeralPort(
+          {
+            host: "127.0.0.1",
+            token: TEST_TOKEN,
+            version: "0.0.0-test",
+            windowsOwnershipId,
+          },
+          {
+            platform: "win32",
+            capture: async () => {
+              captureCount += 1;
+              return { status: "present", identity };
+            },
+          },
+        );
+        for (const endpoint of [
+          PROVIDER_DAEMON_LIVENESS_PATH,
+          PROVIDER_DAEMON_LIVENESS_PATH,
+          PROVIDER_DAEMON_HEALTH_PATH,
+        ]) {
+          const denied = yield* Effect.promise(() => fetch(`http://127.0.0.1:${port}${endpoint}`));
+          assert.equal(denied.status, 401);
+          assert.deepEqual(yield* Effect.promise(() => denied.json()), { error: "unauthorized" });
+          const response = yield* Effect.promise(() =>
+            fetch(`http://127.0.0.1:${port}${endpoint}`, {
+              headers: { authorization: `Bearer ${TEST_TOKEN}` },
+            }),
+          );
+          const body = decodeProviderDaemonLiveness(yield* Effect.promise(() => response.json()));
+          assert.deepEqual(body.windowsProcessIdentity, identity);
+          assert.equal(body.windowsOwnershipId, windowsOwnershipId);
+        }
+        assert.equal(captureCount, 1);
+      }).pipe(Effect.scoped, Effect.provide(providerDaemonServerTestLayer));
+    },
+  );
   it("waits for drain and rejects close for a slow daemon event response", async () => {
     class FakeSlowResponse extends EventEmitter {
       writes: string[] = [];

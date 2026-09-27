@@ -17,8 +17,14 @@ import {
   type ProviderDaemonHealth as ProviderDaemonHealthValue,
   type ProviderDaemonLeaseResponse as ProviderDaemonLeaseResponseValue,
   type ProviderDaemonMarker as ProviderDaemonMarkerValue,
+  type WindowsProcessIdentity,
 } from "@cafecode/contracts";
 import { requestProviderDaemonJson } from "@cafecode/shared/providerDaemonHttp";
+import {
+  createWindowsProviderRuntime,
+  spawnWindowsProviderRuntimeChild,
+  WindowsProviderRuntimeError,
+} from "@cafecode/shared/windowsProviderRuntime";
 import * as Clock from "effect/Clock";
 import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
@@ -91,6 +97,8 @@ export interface ProviderSupervisorProcessSnapshot {
   readonly appVersion: string;
   readonly protocolVersion: number;
   readonly runtimeBuildId?: string;
+  readonly windowsProcessIdentity?: WindowsProcessIdentity;
+  readonly windowsOwnershipId?: string;
   readonly adoptedExistingProcess: boolean;
   readonly durationMs: number;
   readonly health: ProviderDaemonHealthValue;
@@ -99,6 +107,13 @@ export interface ProviderSupervisorProcessSnapshot {
 export interface ProviderSupervisorProcessHandle {
   readonly endpoint: ProviderDaemonClientConfig;
   readonly snapshot: ProviderSupervisorProcessSnapshot;
+}
+
+/** Injection keeps native process creation/ownership out of default unit tests. */
+export interface ProviderSupervisorProcessDependencies {
+  readonly platform?: NodeJS.Platform;
+  readonly createWindowsRuntime?: typeof createWindowsProviderRuntime;
+  readonly spawnWindowsChild?: typeof spawnWindowsProviderRuntimeChild;
 }
 
 function supervisorMarkerPath(config: ServerConfigShape): string {
@@ -113,8 +128,8 @@ function supervisorIpcDir(config: ServerConfigShape): string {
   return path.join(config.stateDir, "provider-supervisor-ipc");
 }
 
-function supervisorIpcSocketPath(config: ServerConfigShape): string {
-  if (process.platform === "win32") {
+function supervisorIpcSocketPath(config: ServerConfigShape, platform = process.platform): string {
+  if (platform === "win32") {
     const suffix = crypto.createHash("sha256").update(config.baseDir).digest("hex").slice(0, 24);
     return `\\\\.\\pipe\\cafecode-provider-supervisor-${suffix}`;
   }
@@ -372,6 +387,105 @@ function providerRuntimeChildEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+const ensureWindowsProviderSupervisorProcess = (
+  input: {
+    readonly config: ServerConfigShape;
+    readonly version: string;
+    readonly runtimeBuildId?: string;
+  },
+  dependencies: ProviderSupervisorProcessDependencies,
+): Effect.Effect<ProviderSupervisorProcessHandle, ProviderSupervisorProcessError> =>
+  Effect.tryPromise({
+    try: async () => {
+      const startedAtMs = performance.now();
+      const socketPath = supervisorIpcSocketPath(input.config, "win32");
+      // Only directories are created here. The helper subsequently validates
+      // and pins their native ancestry before any ownership-file operation.
+      await fs.mkdir(input.config.stateDir, { recursive: true, mode: 0o700 });
+      await fs.mkdir(input.config.secretsDir, { recursive: true, mode: 0o700 });
+      const runtime = (dependencies.createWindowsRuntime ?? createWindowsProviderRuntime)({
+        role: "provider-supervisor",
+        markerPath: supervisorMarkerPath(input.config),
+        legacyCredentialPath: supervisorCredentialPath(input.config),
+        socketPath,
+        appVersion: input.version,
+        protocolVersion: PROVIDER_SUPERVISOR_PROTOCOL_VERSION,
+        ...(input.runtimeBuildId === undefined ? {} : { runtimeBuildId: input.runtimeBuildId }),
+        bootstrap: {
+          cafeCodeHome: input.config.baseDir,
+          ...(input.config.otlpTracesUrl === undefined
+            ? {}
+            : { otlpTracesUrl: input.config.otlpTracesUrl }),
+          ...(input.config.otlpMetricsUrl === undefined
+            ? {}
+            : { otlpMetricsUrl: input.config.otlpMetricsUrl }),
+        },
+        encodeCredential: async (token) => ({
+          base64: Buffer.from(`${token}\n`, "utf8").toString("base64"),
+          encrypted: false,
+        }),
+        decodeCredential: async (base64, encrypted) => {
+          // Server-owned supervisor tokens are already private plaintext files;
+          // the backend cannot decrypt Electron safeStorage credentials. Never
+          // reinterpret ciphertext as a token or rotate it on decode failure.
+          if (encrypted) throw new Error("Supervisor credential format unavailable.");
+          return Buffer.from(base64, "base64").toString("utf8").trim();
+        },
+        spawn: (bootstrap) => {
+          const entrypoint = process.argv[1];
+          if (!entrypoint)
+            return Promise.reject(new Error("Provider supervisor entrypoint unavailable."));
+          // Shared direct-child admission has no PID-based kill or automatic
+          // scope finalizer; bootstrap failure retains its prepared generation.
+          return (dependencies.spawnWindowsChild ?? spawnWindowsProviderRuntimeChild)({
+            executable: process.execPath,
+            entrypoint,
+            cwd: input.config.cwd,
+            env: providerRuntimeChildEnv(),
+            bootstrap,
+          });
+        },
+        // Use the shared Windows controller's bounded health/lease transport:
+        // it enforces an absolute deadline and response byte cap. The legacy
+        // POSIX helpers below have socket-idle timeouts only; injecting them
+        // here could let a dribbling peer outlive the native guard deadline.
+      });
+      const result = await runtime.ensure();
+      return {
+        endpoint: result.endpoint,
+        snapshot: {
+          status: result.adopted ? "adopted" : "spawned",
+          pid: result.marker.pid,
+          endpoint: sanitizeEndpoint(result.endpoint, result.endpoint.leaseId),
+          markerPath: supervisorMarkerPath(input.config),
+          credentialPath: result.marker.credentialPath ?? supervisorCredentialPath(input.config),
+          appVersion: result.marker.appVersion,
+          protocolVersion: PROVIDER_SUPERVISOR_PROTOCOL_VERSION,
+          ...(input.runtimeBuildId === undefined ? {} : { runtimeBuildId: input.runtimeBuildId }),
+          adoptedExistingProcess: result.adopted,
+          ...(result.marker.windowsProcessIdentity === undefined
+            ? {}
+            : { windowsProcessIdentity: result.marker.windowsProcessIdentity }),
+          ...(result.marker.windowsOwnershipId === undefined
+            ? {}
+            : { windowsOwnershipId: result.marker.windowsOwnershipId }),
+          durationMs: Math.round((performance.now() - startedAtMs) * 100) / 100,
+          health: result.health,
+        },
+      };
+    },
+    // Shared/native failures may carry private transport or credential material.
+    // Uncertainty must preserve ownership and never fall into POSIX cleanup.
+    catch: (error) =>
+      new ProviderSupervisorProcessError({
+        operation: "Windows supervisor ownership",
+        cause:
+          error instanceof WindowsProviderRuntimeError
+            ? new WindowsProviderRuntimeError(error.reason).message
+            : "Provider supervisor ownership could not be verified. Existing processes and ownership records were preserved.",
+      }),
+  });
+
 const spawnDetachedSupervisor = (input: {
   readonly config: ServerConfigShape;
   readonly socketPath: string;
@@ -621,12 +735,21 @@ const spawnSupervisor = (input: {
     };
   });
 
-export const ensureProviderSupervisorProcess = (input: {
-  readonly config: ServerConfigShape;
-  readonly version: string;
-  readonly runtimeBuildId?: string;
-}): Effect.Effect<ProviderSupervisorProcessHandle, ProviderSupervisorProcessError> =>
+export const ensureProviderSupervisorProcess = (
+  input: {
+    readonly config: ServerConfigShape;
+    readonly version: string;
+    readonly runtimeBuildId?: string;
+  },
+  dependencies: ProviderSupervisorProcessDependencies = {},
+): Effect.Effect<ProviderSupervisorProcessHandle, ProviderSupervisorProcessError> =>
   Effect.gen(function* () {
+    // This early boundary is intentional: none of the legacy error-to-absence,
+    // unlink, process.kill, or detached-child failure cleanup below may execute
+    // on Windows. macOS/Linux retain their existing tested implementation.
+    if ((dependencies.platform ?? process.platform) === "win32") {
+      return yield* ensureWindowsProviderSupervisorProcess(input, dependencies);
+    }
     const startedAtMs = performance.now();
     const marker = yield* readMarker(supervisorMarkerPath(input.config));
     if (Option.isSome(marker)) {

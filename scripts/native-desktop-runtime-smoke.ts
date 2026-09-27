@@ -97,22 +97,66 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+/**
+ * Compact debug puts the readiness fields directly on each section, whereas
+ * full debug retains the raw manager/renderer data in a `snapshot` wrapper.
+ * Windows qualification needs the latter for native ownership evidence. Keep
+ * availability on the outer section and never fall back to possibly stale
+ * compact fields when a present full-detail wrapper is malformed or empty.
+ */
+function readDebugSectionSnapshot(
+  section: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  return section !== undefined && Object.hasOwn(section, "snapshot")
+    ? readRecord(section.snapshot)
+    : section;
+}
+
 export function summarizeDesktopDebugReadiness(value: unknown): Record<string, unknown> {
   const snapshot = readRecord(value);
   const providerDaemon = readRecord(snapshot?.providerDaemon);
-  const providerHealth = readRecord(providerDaemon?.lastHealth);
+  const providerSnapshot = readDebugSectionSnapshot(providerDaemon);
+  const providerHealth = readRecord(providerSnapshot?.lastHealth);
   const renderer = readRecord(snapshot?.renderer);
-  const diagnostics = readRecord(renderer?.diagnostics);
+  const rendererSnapshot = readDebugSectionSnapshot(renderer);
+  const diagnostics = readRecord(rendererSnapshot?.diagnostics);
   const localApi = readRecord(diagnostics?.localApi);
-  const connection = readRecord(renderer?.connection);
+  const connection = readRecord(rendererSnapshot?.connection);
   return {
     providerAvailable: providerDaemon?.available === true,
-    providerStatus: typeof providerDaemon?.status === "string" ? providerDaemon.status : null,
+    providerStatus: typeof providerSnapshot?.status === "string" ? providerSnapshot.status : null,
     providerHealthOk: providerHealth?.ok === true,
     rendererAvailable: renderer?.available === true,
     rendererLocalApiAvailable: localApi?.available === true,
     rendererWebSocketConnected: connection?.connected === true,
   };
+}
+
+/**
+ * A new isolated Windows install must reach the generation-aware daemon path,
+ * not merely respond to HTTP through an accidentally adopted legacy process.
+ * Return only a boolean; native identities and capability material stay out of
+ * smoke diagnostics. POSIX readiness remains on its original predicates.
+ */
+export function hasWindowsProviderOwnershipEvidence(value: unknown): boolean {
+  const daemon = readDebugSectionSnapshot(readRecord(readRecord(value)?.providerDaemon));
+  const health = readRecord(daemon?.lastHealth);
+  const identity = readRecord(health?.windowsProcessIdentity);
+  const birth = identity?.creationTime100ns;
+  const generation = health?.windowsOwnershipId;
+  return (
+    health?.ok === true &&
+    typeof health.pid === "number" &&
+    Number.isInteger(health.pid) &&
+    health.pid > 0 &&
+    health.pid <= 0xffff_ffff &&
+    identity?.pid === health.pid &&
+    typeof birth === "string" &&
+    /^[1-9][0-9]{0,19}$/.test(birth) &&
+    BigInt(birth) <= 0xffff_ffff_ffff_ffffn &&
+    typeof generation === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(generation)
+  );
 }
 
 export function isReadyDesktopDebugSnapshot(value: unknown): boolean {
@@ -325,9 +369,20 @@ async function runPackagedApplicationSmoke(
       await waitFor(
         "provider daemon health and renderer WebSocket hydration",
         async () => {
-          const snapshot = await readJsonResponse(debugUrl);
+          // Compact debug deliberately omits detailed process-generation data.
+          // This Windows-only smoke owns an isolated synthetic profile, reads
+          // the full response locally, and emits only fixed readiness booleans.
+          const snapshot = await readJsonResponse(
+            process.platform === "win32" ? `${debugUrl}?detail=full` : debugUrl,
+          );
           lastDebugReadiness = summarizeDesktopDebugReadiness(snapshot);
-          return isReadyDesktopDebugSnapshot(snapshot) ? snapshot : undefined;
+          const windowsOwnershipReady =
+            process.platform !== "win32" || hasWindowsProviderOwnershipEvidence(snapshot);
+          if (process.platform === "win32")
+            lastDebugReadiness.windowsOwnershipVerified = windowsOwnershipReady;
+          return isReadyDesktopDebugSnapshot(snapshot) && windowsOwnershipReady
+            ? snapshot
+            : undefined;
         },
         STARTUP_TIMEOUT_MS,
       );

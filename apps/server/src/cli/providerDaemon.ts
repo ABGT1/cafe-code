@@ -134,6 +134,9 @@ export const runProviderDaemonCommand = (flags: { readonly bootstrapFd: Option.O
       ...(bootstrap.runtimeBuildId !== undefined
         ? { runtimeBuildId: bootstrap.runtimeBuildId }
         : {}),
+      ...(bootstrap.windowsOwnershipId !== undefined
+        ? { windowsOwnershipId: bootstrap.windowsOwnershipId }
+        : {}),
     }).pipe(Effect.provide(runtimeLayer));
   });
 
@@ -185,6 +188,9 @@ export const runProviderSupervisorCommand = (flags: {
       protocolVersion: PROVIDER_SUPERVISOR_PROTOCOL_VERSION,
       ...(bootstrap.runtimeBuildId !== undefined
         ? { runtimeBuildId: bootstrap.runtimeBuildId }
+        : {}),
+      ...(bootstrap.windowsOwnershipId !== undefined
+        ? { windowsOwnershipId: bootstrap.windowsOwnershipId }
         : {}),
     }).pipe(Effect.provide(runtimeLayer));
   });
