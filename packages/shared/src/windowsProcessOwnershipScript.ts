@@ -12,11 +12,13 @@
 export const WINDOWS_PROCESS_OWNERSHIP_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 try {
 [Console]::Out.WriteLine('{"id":0,"ok":true,"phase":"source"}')
 [Console]::Out.Flush()
-Add-Type -ReferencedAssemblies System.Web.Extensions -TypeDefinition @'
+# Resolve only the inbox Utility manifest, never ambient module discovery.
+Import-Module -Name ($PSHOME + '\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
+Microsoft.PowerShell.Utility\Add-Type -ReferencedAssemblies System.Web.Extensions -TypeDefinition @'
 using System;
 using System.IO;
 using System.Text;

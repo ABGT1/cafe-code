@@ -89,28 +89,31 @@ async function probePowerShellPipeStartup(): Promise<void> {
   assert.ok(systemRoot && /^[A-Za-z]:\\/.test(systemRoot));
   const executable = join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const script =
-    '[Console]::Out.WriteLine("started"); [Console]::Out.Flush(); [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false); [Console]::Out.WriteLine("encoding"); [Console]::Out.Flush(); $line = [Console]::In.ReadLine(); if ($line -eq "fixture") { [Console]::Out.WriteLine("received"); [Console]::Out.Flush() }; exit 0';
+    '[Console]::Out.WriteLine("started"); [Console]::Out.Flush(); $encoding = New-Object System.Text.UTF8Encoding($false); [Console]::Out.WriteLine("constructed"); [Console]::Out.Flush(); [Console]::InputEncoding = $encoding; [Console]::Out.WriteLine("encoding"); [Console]::Out.Flush(); $line = [Console]::In.ReadLine(); if ($line -eq "fixture") { [Console]::Out.WriteLine("received"); [Console]::Out.Flush() }; exit 0';
   const cases = [
-    { name: "encoded-open", encoded: true, eof: false, profile: false, inputText: false },
-    { name: "encoded-eof", encoded: true, eof: true, profile: false, inputText: false },
-    { name: "encoded-text-open", encoded: true, eof: false, profile: false, inputText: true },
-    { name: "command-open", encoded: false, eof: false, profile: false, inputText: false },
-    { name: "profile-env-open", encoded: true, eof: false, profile: true, inputText: false },
+    { name: "new-object-open", directConstructor: false, pinnedModules: false },
+    { name: "direct-constructor-open", directConstructor: true, pinnedModules: false },
+    { name: "new-object-pinned-module-open", directConstructor: false, pinnedModules: true },
   ];
   await Promise.all(
     cases.map(
       (entry) =>
         new Promise<void>((resolve) => {
           const started = performance.now();
+          const source = entry.directConstructor
+            ? script.replace(
+                "New-Object System.Text.UTF8Encoding($false)",
+                "[Text.UTF8Encoding]::new($false)",
+              )
+            : script;
           const child = spawn(
             executable,
             [
               "-NoLogo",
               "-NoProfile",
               "-NonInteractive",
-              ...(entry.inputText ? ["-InputFormat", "Text"] : []),
-              entry.encoded ? "-EncodedCommand" : "-Command",
-              entry.encoded ? Buffer.from(script, "utf16le").toString("base64") : script,
+              "-EncodedCommand",
+              Buffer.from(source, "utf16le").toString("base64"),
             ],
             {
               shell: false,
@@ -122,13 +125,15 @@ async function probePowerShellPipeStartup(): Promise<void> {
                 PATH: join(systemRoot, "System32"),
                 TEMP: process.env.TEMP,
                 TMP: process.env.TMP,
-                // Only profile directory locations, never ambient provider secrets or
-                // Node hooks. -NoProfile still prohibits user PowerShell profile scripts.
-                ...(entry.profile
+                ...(entry.pinnedModules
                   ? {
-                      USERPROFILE: process.env.USERPROFILE,
-                      APPDATA: process.env.APPDATA,
-                      LOCALAPPDATA: process.env.LOCALAPPDATA,
+                      PSModulePath: join(
+                        systemRoot,
+                        "System32",
+                        "WindowsPowerShell",
+                        "v1.0",
+                        "Modules",
+                      ),
                     }
                   : {}),
               },
@@ -170,7 +175,12 @@ async function probePowerShellPipeStartup(): Promise<void> {
               const newline = buffered.indexOf("\n");
               const line = buffered.slice(0, newline).trim();
               buffered = buffered.slice(newline + 1);
-              if (line === "started" || line === "encoding" || line === "received")
+              if (
+                line === "started" ||
+                line === "constructed" ||
+                line === "encoding" ||
+                line === "received"
+              )
                 phases.push(line);
               else {
                 child.kill();
@@ -185,8 +195,7 @@ async function probePowerShellPipeStartup(): Promise<void> {
           child.on("error", () => finish("spawn-error"));
           child.stdin.on("error", () => {});
           child.on("exit", (code) => finish("exited", code));
-          if (entry.eof) child.stdin.end("fixture\n");
-          else child.stdin.write("fixture\n");
+          child.stdin.write("fixture\n");
         }),
     ),
   );

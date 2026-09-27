@@ -243,8 +243,10 @@ function helperTransport(dependencies: WindowsOwnershipDependencies): HelperTran
   // Set InputEncoding BEFORE the first Console.In access. Changing it inside
   // the loaded script replaces Console's buffered reader and can discard the
   // already-prefetched first JSON request, leaving native startup waiting forever.
+  // Use the PS5.1 .NET constructor directly: New-Object first performs Utility
+  // module discovery, which can stall a deliberately minimal child environment.
   const bootstrap =
-    '$ErrorActionPreference = "Stop"; try { [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false); [Console]::Out.WriteLine(\'{"id":0,"ok":true,"phase":"bootstrap"}\'); [Console]::Out.Flush(); & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadLine())))) } catch { [Console]::Out.WriteLine(\'{"id":0,"ok":false,"reason":"helper-unavailable"}\'); [Console]::Out.Flush() }';
+    '$ErrorActionPreference = "Stop"; try { [Console]::InputEncoding = [Text.UTF8Encoding]::new($false); [Console]::Out.WriteLine(\'{"id":0,"ok":true,"phase":"bootstrap"}\'); [Console]::Out.Flush(); & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadLine())))) } catch { [Console]::Out.WriteLine(\'{"id":0,"ok":false,"reason":"helper-unavailable"}\'); [Console]::Out.Flush() }';
   const args = [
     "-NoLogo",
     "-NoProfile",
@@ -264,6 +266,15 @@ function helperTransport(dependencies: WindowsOwnershipDependencies): HelperTran
           SystemRoot: systemRoot,
           WINDIR: systemRoot,
           PATH: path.win32.join(systemRoot, "System32"),
+          // Do not enumerate user/module-cache directories for the one trusted
+          // inbox cmdlet used by the fixed script. No user module can be loaded.
+          PSModulePath: path.win32.join(
+            systemRoot,
+            "System32",
+            "WindowsPowerShell",
+            "v1.0",
+            "Modules",
+          ),
           ...(environment.TEMP === undefined ? {} : { TEMP: environment.TEMP }),
           ...(environment.TMP === undefined ? {} : { TMP: environment.TMP }),
         },

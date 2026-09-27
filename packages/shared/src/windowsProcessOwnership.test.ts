@@ -124,10 +124,16 @@ describe("Windows process ownership protocol", () => {
       bootstrap.indexOf("[Console]::In.ReadLine"),
     );
     expect(fake.source()).not.toContain("[Console]::InputEncoding");
+    expect(bootstrap).not.toContain("New-Object");
+    expect(fake.source()).not.toContain("New-Object");
     expect(options).toMatchObject({
       shell: false,
       windowsHide: true,
-      env: { SystemRoot: "C:\\Windows", PATH: "C:\\Windows\\System32" },
+      env: {
+        SystemRoot: "C:\\Windows",
+        PATH: "C:\\Windows\\System32",
+        PSModulePath: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules",
+      },
     });
     expect(JSON.stringify(options)).not.toContain("do-not-inherit");
     expect(fake.source()).toBe(WINDOWS_PROCESS_OWNERSHIP_SCRIPT);
