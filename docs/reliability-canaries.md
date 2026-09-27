@@ -59,5 +59,8 @@ runner or its existing explicit local opt-in.
 Failure triage should distinguish readiness, provider ownership, event journal
 durability, canonical ingestion, accounting settlement and renderer delivery.
 Retry only bounded, idempotent infrastructure observations or the exact storage
-write. Never resend an inference prompt merely because its acknowledgement was
-lost.
+write when its owner explicitly guarantees replay safety. Windows ownership
+publication and retirement are not replayable after an ambiguous response:
+reacquire the native guard and re-observe the durable generation before deciding
+the next action, even when the proposed bytes are identical. Never resend an
+inference prompt merely because its acknowledgement was lost.

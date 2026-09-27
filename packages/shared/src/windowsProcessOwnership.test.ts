@@ -288,6 +288,22 @@ describe("Windows process ownership protocol", () => {
     ).toThrow(WindowsOwnershipError);
   });
 
+  it("native credential selection returns only pinned configured paths, never candidate casing", () => {
+    const start = WINDOWS_PROCESS_OWNERSHIP_SCRIPT.indexOf("static string CredentialFor(");
+    const end = WINDOWS_PROCESS_OWNERSHIP_SCRIPT.indexOf(
+      "static Dictionary<string,object> MarkerObject",
+      start,
+    );
+    const source = WINDOWS_PROCESS_OWNERSHIP_SCRIPT.slice(start, end);
+    expect(source).toContain("return Credential;");
+    expect(source).toContain("return derived;");
+    expect(source).not.toContain("return path;");
+    expect(source).toContain('string derived = Credential + "." + generation;');
+    expect(WINDOWS_PROCESS_OWNERSHIP_SCRIPT).toContain(
+      "Path.GetDirectoryName(Marker),Path.GetDirectoryName(Credential),StringComparison.Ordinal)",
+    );
+  });
+
   it("serializes helper-owned mutation requests under a single live guard", async () => {
     const fake = fixture((request, reply) => {
       if (request.op === "open") reply({ opened: true });

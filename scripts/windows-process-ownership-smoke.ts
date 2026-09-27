@@ -7,10 +7,20 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir, release } from "node:os";
 import { dirname, join } from "node:path";
-import { PassThrough } from "node:stream";
+import { PassThrough, Transform } from "node:stream";
 import { fileURLToPath } from "node:url";
 import {
   captureWindowsProcessIdentity,
@@ -131,12 +141,40 @@ async function startFixture(): Promise<ChildProcessWithoutNullStreams> {
  * helper remains the sole lock holder and file mutator. A fresh helper must
  * recover by reading committed bytes, never by replaying the lost request.
  */
-function faultTransport() {
+function faultTransport(sourceFault?: { readonly anchor: string; readonly replacement: string }) {
   let helper: ChildProcessWithoutNullStreams | undefined;
   let dropResponse = false;
   const dependency: WindowsOwnershipDependencies = {
     spawn: (executable, args, options) => {
       helper = spawn(executable, [...args], { ...options, stdio: "pipe" });
+      if (sourceFault !== undefined) {
+        const originalInput = helper.stdin;
+        let firstInput = true;
+        // Test-only instrumentation of the repository-owned source frame. No
+        // environment hook or mutation option exists in the production helper.
+        // The fault occurs inside the very helper holding the real native guard.
+        const instrumentedInput = new Transform({
+          transform(chunk: Buffer, _encoding, callback) {
+            if (!firstInput) {
+              callback(null, chunk);
+              return;
+            }
+            firstInput = false;
+            const source = Buffer.from(chunk.toString("utf8").trim(), "base64").toString("utf8");
+            const first = source.indexOf(sourceFault.anchor);
+            if (first < 0 || first !== source.lastIndexOf(sourceFault.anchor)) {
+              callback(new Error("Native fault fixture source anchor must occur exactly once."));
+              return;
+            }
+            const instrumented = source.replace(sourceFault.anchor, sourceFault.replacement);
+            callback(null, `${Buffer.from(instrumented, "utf8").toString("base64")}\n`);
+          },
+        });
+        instrumentedInput.pipe(originalInput);
+        originalInput.on("error", (error) => instrumentedInput.destroy(error));
+        instrumentedInput.on("close", () => originalInput.destroy());
+        Object.defineProperty(helper, "stdin", { value: instrumentedInput });
+      }
       const original = helper.stdout;
       const forwarded = new PassThrough();
       original.on("data", (chunk: Buffer) => {
@@ -170,6 +208,7 @@ export async function runWindowsProcessOwnershipSmoke(): Promise<void> {
   const root = await mkdtemp(join(tmpdir(), "cafecode-windows-ownership-"));
   let child: ChildProcessWithoutNullStreams | undefined;
   let identity: WindowsProcessIdentity | undefined;
+  let junctionFixture: string | undefined;
   const sessions = new Set<WindowsOwnershipSession>();
   const results: Record<string, boolean> = {};
   const timing: Record<string, number> = {};
@@ -251,6 +290,28 @@ export async function runWindowsProcessOwnershipSmoke(): Promise<void> {
       (error: unknown) => error instanceof WindowsOwnershipError && error.reason === "unsafe-path",
     );
     results.slashTraversalRejected = true;
+    // Junction creation needs no Developer Mode or administrator symlink
+    // privilege. Keep both the link and its empty target inside this invocation's
+    // disposable root; native validation must reject before creating a guard.
+    const junctionTarget = join(root, "junction-target");
+    await mkdir(junctionTarget);
+    const junctionPath = join(root, "junction-alias");
+    await symlink(junctionTarget, junctionPath, "junction");
+    junctionFixture = junctionPath;
+    await assert.rejects(
+      openWindowsOwnershipSession({
+        markerPath: join(junctionPath, "provider-daemon.json"),
+        legacyCredentialPath: join(junctionPath, "provider-daemon-token.bin"),
+        role: "daemon",
+      }),
+      (error: unknown) =>
+        error instanceof WindowsOwnershipError && error.reason === "unsafe-directory-reparse",
+    );
+    assert.deepEqual(await readdir(junctionTarget), []);
+    // Remove only the directory entry, never recursively traverse the junction.
+    await unlink(junctionPath);
+    junctionFixture = undefined;
+    results.junctionAncestorRejectedBeforeMutation = true;
     started = performance.now();
     assert.equal((await owner.session.observe(identity)).status, "same-process");
     timing.hotObserveMs = Math.round(performance.now() - started);
@@ -375,6 +436,146 @@ export async function runWindowsProcessOwnershipSmoke(): Promise<void> {
     results.exactGenerationCleanup = true;
     await close(recovered.session);
 
+    const newRecord = () => {
+      const windowsOwnershipId = randomUUID();
+      return {
+        ...prepared,
+        windowsOwnershipId,
+        credentialPath: windowsOwnershipCredentialPath(
+          owner.legacyCredentialPath,
+          windowsOwnershipId,
+        ),
+      };
+    };
+    const publishRecord = (
+      session: WindowsOwnershipSession,
+      record: ReturnType<typeof newRecord>,
+    ) =>
+      session.publish({
+        expectedRevision: null,
+        markerJson: JSON.stringify(record),
+        credentialBase64: Buffer.from(TEST_TOKEN).toString("base64"),
+      });
+
+    // A lost initial prepared-publication ACK must be recovered by observing
+    // its exact durable bytes, not by publishing another generation over it.
+    const preparedLostReply = faultTransport();
+    const preparedUncertain = await open("daemon", preparedLostReply.dependency);
+    const uncertainPreparedRecord = newRecord();
+    preparedLostReply.loseNextResponse();
+    await assert.rejects(publishRecord(preparedUncertain.session, uncertainPreparedRecord));
+    await close(preparedUncertain.session);
+    const preparedReobserved = await open("daemon");
+    const preparedSnapshot = await preparedReobserved.session.read();
+    assert.ok(preparedSnapshot.revision);
+    assert.deepEqual(JSON.parse(preparedSnapshot.markerJson!), uncertainPreparedRecord);
+    await assert.rejects(
+      publishRecord(preparedReobserved.session, newRecord()),
+      (error: unknown) =>
+        error instanceof WindowsOwnershipError && error.reason === "ownership-changed",
+    );
+    await preparedReobserved.session.retire(preparedSnapshot.revision);
+    await close(preparedReobserved.session);
+    results.lostPreparedPublicationReplyReobserved = true;
+
+    // Kill at the native boundary after the credential became durable but
+    // before any marker publication. Preserve the orphan as evidence; a later
+    // generation uses its own credential and never adopts/replays the old one.
+    const credentialBoundary = "if (existing == null) WriteAtomic(credentialPath,bytes);";
+    const credentialCrash = faultTransport({
+      anchor: credentialBoundary,
+      replacement: `${credentialBoundary} Environment.Exit(73);`,
+    });
+    const credentialUncertain = await open("daemon", credentialCrash.dependency);
+    const credentialOnlyRecord = newRecord();
+    await assert.rejects(publishRecord(credentialUncertain.session, credentialOnlyRecord));
+    await close(credentialUncertain.session);
+    const afterCredentialCrash = await open("daemon");
+    assert.deepEqual(await afterCredentialCrash.session.read(), {
+      markerJson: null,
+      revision: null,
+    });
+    assert.equal(await readFile(credentialOnlyRecord.credentialPath, "utf8"), TEST_TOKEN);
+    const postCredentialRecord = newRecord();
+    const postCredentialRevision = await publishRecord(
+      afterCredentialCrash.session,
+      postCredentialRecord,
+    );
+    await afterCredentialCrash.session.retire(postCredentialRevision);
+    assert.equal(await readFile(credentialOnlyRecord.credentialPath, "utf8"), TEST_TOKEN);
+    await close(afterCredentialCrash.session);
+    results.credentialBeforeMarkerCrashReobserved = true;
+
+    // A lost retirement ACK can mean that both deletes completed. Re-observe
+    // absence; an old revision must not retire a subsequently admitted owner.
+    const retireLostReply = faultTransport();
+    const retireUncertain = await open("daemon", retireLostReply.dependency);
+    const retiredRecord = newRecord();
+    const retiredRevision = await publishRecord(retireUncertain.session, retiredRecord);
+    retireLostReply.loseNextResponse();
+    await assert.rejects(retireUncertain.session.retire(retiredRevision));
+    await close(retireUncertain.session);
+    const retirementReobserved = await open("daemon");
+    assert.deepEqual(await retirementReobserved.session.read(), {
+      markerJson: null,
+      revision: null,
+    });
+    await assert.rejects(readFile(retiredRecord.credentialPath), { code: "ENOENT" });
+    const replacementRecord = newRecord();
+    const replacementRevision = await publishRecord(
+      retirementReobserved.session,
+      replacementRecord,
+    );
+    await assert.rejects(
+      retirementReobserved.session.retire(retiredRevision),
+      (error: unknown) =>
+        error instanceof WindowsOwnershipError && error.reason === "ownership-changed",
+    );
+    assert.equal((await retirementReobserved.session.read()).revision, replacementRevision);
+    assert.equal(await readFile(replacementRecord.credentialPath, "utf8"), TEST_TOKEN);
+    await retirementReobserved.session.retire(replacementRevision);
+    await close(retirementReobserved.session);
+    results.lostRetirementReplyDoesNotDeleteNewGeneration = true;
+
+    // Kill inside retirement after marker removal but before credential removal.
+    // Its stale credential remains untouched; a new owner's marker/token must
+    // survive every stale-revision cleanup attempt after the guard is reacquired.
+    const retirementBoundary = 'if (!DeleteFile(Marker)) Fail("mutation-unconfirmed");';
+    const retirementCrash = faultTransport({
+      anchor: retirementBoundary,
+      replacement: `${retirementBoundary} Environment.Exit(73);`,
+    });
+    const partialRetirement = await open("daemon", retirementCrash.dependency);
+    const partialRetiredRecord = newRecord();
+    const partialRetiredRevision = await publishRecord(
+      partialRetirement.session,
+      partialRetiredRecord,
+    );
+    await assert.rejects(partialRetirement.session.retire(partialRetiredRevision));
+    await close(partialRetirement.session);
+    const afterRetirementCrash = await open("daemon");
+    assert.deepEqual(await afterRetirementCrash.session.read(), {
+      markerJson: null,
+      revision: null,
+    });
+    assert.equal(await readFile(partialRetiredRecord.credentialPath, "utf8"), TEST_TOKEN);
+    const postRetirementRecord = newRecord();
+    const postRetirementRevision = await publishRecord(
+      afterRetirementCrash.session,
+      postRetirementRecord,
+    );
+    await assert.rejects(
+      afterRetirementCrash.session.retire(partialRetiredRevision),
+      (error: unknown) =>
+        error instanceof WindowsOwnershipError && error.reason === "ownership-changed",
+    );
+    assert.equal((await afterRetirementCrash.session.read()).revision, postRetirementRevision);
+    assert.equal(await readFile(postRetirementRecord.credentialPath, "utf8"), TEST_TOKEN);
+    await afterRetirementCrash.session.retire(postRetirementRevision);
+    assert.equal(await readFile(partialRetiredRecord.credentialPath, "utf8"), TEST_TOKEN);
+    await close(afterRetirementCrash.session);
+    results.markerBeforeCredentialRetirementCrashReobserved = true;
+
     // Supervisors deliberately keep marker and credentials in different pinned
     // directories. Exercise the same native transaction authority for that role.
     const supervisor = await open("supervisor");
@@ -421,6 +622,7 @@ export async function runWindowsProcessOwnershipSmoke(): Promise<void> {
     );
   } finally {
     for (const session of sessions) await close(session);
+    if (junctionFixture !== undefined) await unlink(junctionFixture);
     if (identity !== undefined && child?.exitCode === null && child.signalCode === null)
       await terminateWindowsProcess(identity);
     // The fixture's stdin EOF is a cooperative exit, not a raw PID signal.
@@ -436,7 +638,7 @@ if (import.meta.main) {
     process.stdin.resume();
     process.stdin.once("end", () => process.exit(0));
     // Independent backstop if the parent loses its streams during a test crash.
-    setTimeout(() => process.exit(0), 120_000);
+    setTimeout(() => process.exit(0), 180_000);
   } else {
     await runWindowsProcessOwnershipSmoke();
   }

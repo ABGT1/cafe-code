@@ -1,7 +1,7 @@
 # Windows daemon ownership uses process identity, not PID existence
 
 Created: 2026-09-27 18:58:45 JST (UTC+0900)
-Last updated: 2026-09-27 19:41:49 JST (UTC+0900)
+Last updated: 2026-09-27 20:33:06 JST (UTC+0900)
 Decision status: accepted for implementation by the user's explicit Windows fix request.
 Implementation status: in progress; native Windows qualification pending.
 Supersession: none.
@@ -35,6 +35,10 @@ Current finite budgets are 15 seconds per helper operation, 120 seconds per help
 Timeout-based deletion and process-name allowlists were rejected because neither establishes identity. CIM-only timestamps do not solve the termination check/use race. A compiled helper remains an alternative if constrained Win32 interop cannot qualify; the safety requirements must not be weakened to accommodate helper failure.
 
 The helper is Windows-only, hidden, shell-free, profile-free, bounded, and selected from the system directory. Private structured standard streams carry credentials and record bodies, never argv or diagnostics. Ownership paths are constrained to the role's expected files and must reject reparse redirection. Debugging exposes fixed outcomes rather than helper output or raw errors.
+
+The fixed bootstrap uses the direct .NET UTF-8 constructor and loads only the inbox PowerShell Utility module before compiling the Win32 boundary. A bounded startup handshake prevents JSON requests from racing initialization of the helper's final reader. Native Windows qualification caught a stalled command-based encoding initializer; it was corrected without expanding the authority or disabling policy checks.
+
+Windows may expose temporary/profile directories through 8.3 aliases. The helper validates the original and canonical drive-absolute spellings, rejects traversal and ambiguous separators, and pins every canonical ancestor against replacement while rejecting reparse points. Credential alias comparison never changes the mutation target: reads and writes use only the configured, pinned legacy path or its validated generation-derived path. Interrupted multi-file publication/retirement can leave an orphan generation credential; it is preserved as private recovery evidence, never reused for another generation or bulk-deleted automatically.
 
 Updated writers coordinate through one native guard. Old concurrent binaries do not honor it, so mixed-version writers for one profile are unsupported. Downgrade requires an explicit controlled stop/recovery, not deleting new metadata from a live owner's record. Policy-blocked helpers and uncertain legacy owners may require guided manual recovery. The design does not defend against an adversary already controlling the same user's executable and private profile.
 

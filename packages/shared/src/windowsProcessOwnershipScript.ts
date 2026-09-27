@@ -178,8 +178,13 @@ public static class CafeWindowsOwnership {
   static string CredentialFor(Dictionary<string,object> marker) {
     string path = FullPath(Text(marker,"credentialPath") ?? Credential);
     string generation = Text(marker,"windowsOwnershipId");
-    if (!String.Equals(path, Credential, StringComparison.OrdinalIgnoreCase) && !(IsGeneration(generation) && String.Equals(path, Credential + "." + generation, StringComparison.OrdinalIgnoreCase))) Fail("unsafe-path");
-    return path;
+    // Comparison may accept a legacy alias/casing spelling, but authority is
+    // always the configured path whose ancestors we pinned. Returning the
+    // candidate would escape that authority in a case-sensitive NTFS directory.
+    if (String.Equals(path, Credential, StringComparison.OrdinalIgnoreCase)) return Credential;
+    string derived = Credential + "." + generation;
+    if (IsGeneration(generation) && String.Equals(path, derived, StringComparison.OrdinalIgnoreCase)) return derived;
+    Fail("unsafe-path"); return null;
   }
   static Dictionary<string,object> MarkerObject(string source) {
     if (source == null || Utf8.GetByteCount(source) > 4096) Fail("record-invalid");
@@ -194,7 +199,9 @@ public static class CafeWindowsOwnership {
     Marker = FullPath(Text(request,"markerPath")); Credential = FullPath(Text(request,"legacyCredentialPath")); Role = Text(request,"role");
     if ((Role != "daemon" && Role != "supervisor") || Path.GetFileName(Marker) != "provider-" + Role + ".json" || Path.GetFileName(Credential) != (Role == "daemon" ? "provider-daemon-token.bin" : "provider-supervisor-token")) Fail("unsafe-path");
     HoldDirectory(Path.GetDirectoryName(Marker));
-    if (!String.Equals(Path.GetDirectoryName(Marker),Path.GetDirectoryName(Credential),StringComparison.OrdinalIgnoreCase)) HoldDirectory(Path.GetDirectoryName(Credential));
+    // NTFS can enable case sensitivity per directory. Skip the second pin only
+    // for exactly identical canonical spellings, never case-folded equality.
+    if (!String.Equals(Path.GetDirectoryName(Marker),Path.GetDirectoryName(Credential),StringComparison.Ordinal)) HoldDirectory(Path.GetDirectoryName(Credential));
     string guardPath = Marker + ".ownership.lock";
     if (String.Equals(Credential,guardPath,StringComparison.OrdinalIgnoreCase)) Fail("unsafe-path");
     DateTime until = DateTime.UtcNow.AddSeconds(5);

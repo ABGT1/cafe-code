@@ -35,6 +35,95 @@ describe("native desktop runtime smoke", () => {
         hasWindowsProviderOwnershipEvidence({ providerDaemon: { lastHealth: invalid } }),
       );
   });
+
+  it("reads the actual full debug wrappers without relaxing packaged Windows readiness", () => {
+    // DesktopDebugServer.buildFullDebugSnapshot wraps both raw snapshots;
+    // unlike compact debug, the outer objects expose availability only.
+    const health = {
+      ok: true,
+      pid: 27,
+      windowsProcessIdentity: { pid: 27, creationTime100ns: "134348901321234567" },
+      windowsOwnershipId: "9a90b48d-868f-4614-ae9c-66d50293d52b",
+    };
+    const full = {
+      schemaVersion: 1,
+      debug: { detail: "full" },
+      providerDaemon: {
+        available: true,
+        snapshot: { status: "running", lastHealth: health },
+      },
+      renderer: {
+        available: true,
+        snapshot: {
+          diagnostics: { localApi: { available: true } },
+          connection: { connected: true },
+        },
+        history: [],
+      },
+    };
+    assert.deepEqual(summarizeDesktopDebugReadiness(full), {
+      providerAvailable: true,
+      providerStatus: "running",
+      providerHealthOk: true,
+      rendererAvailable: true,
+      rendererLocalApiAvailable: true,
+      rendererWebSocketConnected: true,
+    });
+    assert.isTrue(isReadyDesktopDebugSnapshot(full));
+    assert.isTrue(hasWindowsProviderOwnershipEvidence(full));
+    assert.isFalse(
+      isReadyDesktopDebugSnapshot({
+        ...full,
+        renderer: { ...full.renderer, available: false },
+      }),
+    );
+    assert.isFalse(
+      isReadyDesktopDebugSnapshot({
+        ...full,
+        renderer: {
+          ...full.renderer,
+          snapshot: { ...full.renderer.snapshot, connection: { connected: false } },
+        },
+      }),
+    );
+    for (const invalidHealth of [
+      { ...health, ok: false },
+      { ...health, windowsOwnershipId: undefined },
+      { ...health, windowsProcessIdentity: { ...health.windowsProcessIdentity, pid: 28 } },
+    ])
+      assert.isFalse(
+        hasWindowsProviderOwnershipEvidence({
+          ...full,
+          providerDaemon: {
+            ...full.providerDaemon,
+            snapshot: { ...full.providerDaemon.snapshot, lastHealth: invalidHealth },
+          },
+        }),
+      );
+  });
+
+  it("does not substitute compact fields for a malformed full snapshot", () => {
+    const invalidFull = {
+      providerDaemon: { available: true, snapshot: null, lastHealth: { ok: true } },
+      renderer: {
+        available: true,
+        snapshot: [],
+        diagnostics: { localApi: { available: true } },
+        connection: { connected: true },
+      },
+    };
+    assert.isFalse(isReadyDesktopDebugSnapshot(invalidFull));
+    assert.isFalse(hasWindowsProviderOwnershipEvidence(invalidFull));
+    assert.deepEqual(summarizeDesktopDebugReadiness(invalidFull), {
+      providerAvailable: true,
+      providerStatus: null,
+      providerHealthOk: false,
+      rendererAvailable: true,
+      rendererLocalApiAvailable: false,
+      rendererWebSocketConnected: false,
+    });
+  });
+
   it("parses explicit app and resource paths", () => {
     const options = parseRuntimeSmokeArgs(["--app", "./Cafe Code", "--resources", "./Resources"]);
     assert.match(options.appPath, /Cafe Code$/);

@@ -97,17 +97,34 @@ function readRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
+/**
+ * Compact debug puts the readiness fields directly on each section, whereas
+ * full debug retains the raw manager/renderer data in a `snapshot` wrapper.
+ * Windows qualification needs the latter for native ownership evidence. Keep
+ * availability on the outer section and never fall back to possibly stale
+ * compact fields when a present full-detail wrapper is malformed or empty.
+ */
+function readDebugSectionSnapshot(
+  section: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  return section !== undefined && Object.hasOwn(section, "snapshot")
+    ? readRecord(section.snapshot)
+    : section;
+}
+
 export function summarizeDesktopDebugReadiness(value: unknown): Record<string, unknown> {
   const snapshot = readRecord(value);
   const providerDaemon = readRecord(snapshot?.providerDaemon);
-  const providerHealth = readRecord(providerDaemon?.lastHealth);
+  const providerSnapshot = readDebugSectionSnapshot(providerDaemon);
+  const providerHealth = readRecord(providerSnapshot?.lastHealth);
   const renderer = readRecord(snapshot?.renderer);
-  const diagnostics = readRecord(renderer?.diagnostics);
+  const rendererSnapshot = readDebugSectionSnapshot(renderer);
+  const diagnostics = readRecord(rendererSnapshot?.diagnostics);
   const localApi = readRecord(diagnostics?.localApi);
-  const connection = readRecord(renderer?.connection);
+  const connection = readRecord(rendererSnapshot?.connection);
   return {
     providerAvailable: providerDaemon?.available === true,
-    providerStatus: typeof providerDaemon?.status === "string" ? providerDaemon.status : null,
+    providerStatus: typeof providerSnapshot?.status === "string" ? providerSnapshot.status : null,
     providerHealthOk: providerHealth?.ok === true,
     rendererAvailable: renderer?.available === true,
     rendererLocalApiAvailable: localApi?.available === true,
@@ -122,7 +139,7 @@ export function summarizeDesktopDebugReadiness(value: unknown): Record<string, u
  * smoke diagnostics. POSIX readiness remains on its original predicates.
  */
 export function hasWindowsProviderOwnershipEvidence(value: unknown): boolean {
-  const daemon = readRecord(readRecord(value)?.providerDaemon);
+  const daemon = readDebugSectionSnapshot(readRecord(readRecord(value)?.providerDaemon));
   const health = readRecord(daemon?.lastHealth);
   const identity = readRecord(health?.windowsProcessIdentity);
   const birth = identity?.creationTime100ns;
