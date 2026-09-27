@@ -83,6 +83,115 @@ async function readPowerShellEnvironment(): Promise<{ version: string; languageM
   });
 }
 
+/** Isolate native host startup without provider data or ownership operations. */
+async function probePowerShellPipeStartup(): Promise<void> {
+  const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
+  assert.ok(systemRoot && /^[A-Za-z]:\\/.test(systemRoot));
+  const executable = join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const script =
+    '[Console]::Out.WriteLine("started"); [Console]::Out.Flush(); [Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false); [Console]::Out.WriteLine("encoding"); [Console]::Out.Flush(); $line = [Console]::In.ReadLine(); if ($line -eq "fixture") { [Console]::Out.WriteLine("received"); [Console]::Out.Flush() }; exit 0';
+  const cases = [
+    { name: "encoded-open", encoded: true, eof: false, profile: false, inputText: false },
+    { name: "encoded-eof", encoded: true, eof: true, profile: false, inputText: false },
+    { name: "encoded-text-open", encoded: true, eof: false, profile: false, inputText: true },
+    { name: "command-open", encoded: false, eof: false, profile: false, inputText: false },
+    { name: "profile-env-open", encoded: true, eof: false, profile: true, inputText: false },
+  ];
+  await Promise.all(
+    cases.map(
+      (entry) =>
+        new Promise<void>((resolve) => {
+          const started = performance.now();
+          const child = spawn(
+            executable,
+            [
+              "-NoLogo",
+              "-NoProfile",
+              "-NonInteractive",
+              ...(entry.inputText ? ["-InputFormat", "Text"] : []),
+              entry.encoded ? "-EncodedCommand" : "-Command",
+              entry.encoded ? Buffer.from(script, "utf16le").toString("base64") : script,
+            ],
+            {
+              shell: false,
+              windowsHide: true,
+              stdio: "pipe",
+              env: {
+                SystemRoot: systemRoot,
+                WINDIR: systemRoot,
+                PATH: join(systemRoot, "System32"),
+                TEMP: process.env.TEMP,
+                TMP: process.env.TMP,
+                // Only profile directory locations, never ambient provider secrets or
+                // Node hooks. -NoProfile still prohibits user PowerShell profile scripts.
+                ...(entry.profile
+                  ? {
+                      USERPROFILE: process.env.USERPROFILE,
+                      APPDATA: process.env.APPDATA,
+                      LOCALAPPDATA: process.env.LOCALAPPDATA,
+                    }
+                  : {}),
+              },
+            },
+          );
+          const phases: string[] = [];
+          let buffered = "";
+          let stderrBytes = 0;
+          let finished = false;
+          const finish = (outcome: string, code?: number | null) => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timer);
+            console.info(
+              JSON.stringify({
+                phase: "native-host-probe",
+                variant: entry.name,
+                outcome,
+                phases,
+                stderrBytes,
+                durationMs: Math.round(performance.now() - started),
+                ...(code === undefined ? {} : { exitCode: code }),
+              }),
+            );
+            resolve();
+          };
+          const timer = setTimeout(() => {
+            child.kill();
+            finish("timeout");
+          }, 15_000);
+          child.stdout.on("data", (chunk: Buffer) => {
+            buffered += chunk.toString("utf8");
+            if (buffered.length > 1_024) {
+              child.kill();
+              finish("oversize");
+              return;
+            }
+            while (buffered.includes("\n")) {
+              const newline = buffered.indexOf("\n");
+              const line = buffered.slice(0, newline).trim();
+              buffered = buffered.slice(newline + 1);
+              if (line === "started" || line === "encoding" || line === "received")
+                phases.push(line);
+              else {
+                child.kill();
+                finish("invalid-output");
+                return;
+              }
+            }
+          });
+          child.stderr.on("data", (chunk: Buffer) => {
+            stderrBytes += chunk.length;
+          });
+          child.on("error", () => finish("spawn-error"));
+          child.stdin.on("error", () => {});
+          child.on("exit", (code) => finish("exited", code));
+          if (entry.eof) child.stdin.end("fixture\n");
+          else child.stdin.write("fixture\n");
+        }),
+    ),
+  );
+}
+
 async function waitForExit(child: ChildProcessWithoutNullStreams): Promise<void> {
   const deadline = Date.now() + 10_000;
   while (child.exitCode === null && child.signalCode === null && Date.now() < deadline) {
@@ -206,6 +315,7 @@ export async function runWindowsProcessOwnershipSmoke(): Promise<void> {
         runnerImageVersion: process.env.ImageVersion ?? null,
       }),
     );
+    await probePowerShellPipeStartup();
     child = await startFixture();
     assert.ok(child.pid);
     let started = performance.now();
