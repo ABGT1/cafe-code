@@ -115,7 +115,9 @@ public static class CafeWindowsOwnership {
   }
 
   static void RequirePathSpelling(string path) {
-    if (path == null || path.Length > 1024 || path.Length < 4 || !char.IsLetter(path[0]) || path[1] != ':' || path[2] != '\\' || path.IndexOf(':', 2) >= 0 || path.IndexOf('\0') >= 0) Fail("unsafe-path");
+    // Forward slashes are also Win32 separators. Reject them before the
+    // backslash component scan so normalization cannot erase slash-based '..'.
+    if (path == null || path.Length > 1024 || path.Length < 4 || !char.IsLetter(path[0]) || path[1] != ':' || path[2] != '\\' || path.IndexOf(':', 2) >= 0 || path.IndexOf('/') >= 0 || path.IndexOf('\0') >= 0) Fail("unsafe-path");
     foreach (string part in path.Substring(3).Split('\\')) {
       if (part.Length == 0 || part.EndsWith(".") || part.EndsWith(" ")) Fail("unsafe-path");
     }

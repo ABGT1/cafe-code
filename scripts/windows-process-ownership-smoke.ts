@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir, release } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -242,6 +242,15 @@ export async function runWindowsProcessOwnershipSmoke(): Promise<void> {
     assert.equal(typeof identity.creationTime100ns, "string");
     results.capture = true;
     const owner = await open("daemon");
+    await assert.rejects(
+      openWindowsOwnershipSession({
+        markerPath: `${dirname(owner.markerPath)}/../state\\provider-daemon.json`,
+        legacyCredentialPath: owner.legacyCredentialPath,
+        role: "daemon",
+      }),
+      (error: unknown) => error instanceof WindowsOwnershipError && error.reason === "unsafe-path",
+    );
+    results.slashTraversalRejected = true;
     started = performance.now();
     assert.equal((await owner.session.observe(identity)).status, "same-process");
     timing.hotObserveMs = Math.round(performance.now() - started);
@@ -259,6 +268,22 @@ export async function runWindowsProcessOwnershipSmoke(): Promise<void> {
       (error: unknown) => error instanceof WindowsOwnershipError && error.reason === "lock-busy",
     );
     results.concurrentGuardExclusion = true;
+    // Node realpath expands an existing 8.3 TEMP alias when one is present. The
+    // canonical/case variant must contend on the same native guard; it must not
+    // create a second ownership authority under another spelling of one folder.
+    const canonicalOwnerDirectory = await realpath(dirname(owner.markerPath));
+    await assert.rejects(
+      openWindowsOwnershipSession({
+        markerPath: join(canonicalOwnerDirectory.toUpperCase(), "provider-daemon.json"),
+        legacyCredentialPath: join(
+          canonicalOwnerDirectory.toUpperCase(),
+          "provider-daemon-token.bin",
+        ),
+        role: "daemon",
+      }),
+      (error: unknown) => error instanceof WindowsOwnershipError && error.reason === "lock-busy",
+    );
+    results.canonicalCaseAliasGuardExclusion = true;
     const ownershipId = randomUUID();
     const credentialPath = windowsOwnershipCredentialPath(owner.legacyCredentialPath, ownershipId);
     const unrelatedCredential = windowsOwnershipCredentialPath(
