@@ -1205,6 +1205,21 @@ const ThreadSessionSetCommand = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
   terminalTurnRecovery: Schema.optional(TerminalTurnRecoveryReason),
+  // Server-only compare-and-set for asynchronous provider observations. The
+  // engine checks this under serialized command admission, never trusting an
+  // earlier ingestion shell read to close a subsequently accepted turn. Only
+  // lifecycle metadata is carried, not provider content or private identity.
+  expectedSessionLifecycle: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        status: OrchestrationSessionStatus,
+        activeTurnId: Schema.NullOr(TurnId),
+        providerName: Schema.NullOr(TrimmedNonEmptyString),
+        providerInstanceId: Schema.NullOr(ProviderInstanceId),
+        updatedAt: IsoDateTime,
+      }),
+    ),
+  ),
   // Server-only admission proof for a replacement ACK. This is deliberately
   // absent from the persisted event: the engine verifies the durable intent
   // and current projection while serializing this command with user controls.

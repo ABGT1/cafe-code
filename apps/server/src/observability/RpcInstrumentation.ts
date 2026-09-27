@@ -27,6 +27,8 @@ const RPC_METHODS_WITH_TRACING_DISABLED: ReadonlySet<string> = new Set([
   WS_METHODS.dictationSetApiKey,
   WS_METHODS.dictationClearApiKey,
   WS_METHODS.dictationCreateClientSecret,
+  // The request and result are user-authored text. Never add either to spans.
+  WS_METHODS.dictationRewriteText,
 ]);
 
 function shouldTraceRpc(method: string): boolean {

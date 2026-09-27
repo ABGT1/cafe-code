@@ -153,6 +153,12 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it("declares why packaged macOS builds request microphone access", () => {
     assert.deepStrictEqual(resolveMacDesktopBuildConfig("dmg", false), {
+      extraResources: [
+        {
+          from: "apps/desktop/resources/mac-dictation-target",
+          to: "mac-dictation-target",
+        },
+      ],
       mac: {
         target: ["dmg", "zip"],
         icon: "icon.icns",

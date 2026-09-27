@@ -143,7 +143,11 @@ function applyTheme(theme: Theme, animate = false) {
 function syncDesktopTheme(theme: Theme) {
   if (typeof window === "undefined") return;
   const bridge = window.desktopBridge;
-  if (!bridge || lastDesktopTheme === theme) {
+  // Auxiliary renderers, including global dictation, deliberately receive a
+  // smaller preload bridge. Theme initialization also runs during module
+  // evaluation, so assuming every desktop bridge owns native theme control
+  // would stop the renderer before it can send its readiness handshake.
+  if (typeof bridge?.setTheme !== "function" || lastDesktopTheme === theme) {
     return;
   }
 

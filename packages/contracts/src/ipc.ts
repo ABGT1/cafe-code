@@ -357,6 +357,37 @@ export type DesktopDebugEndpointState = typeof DesktopDebugEndpointStateSchema.T
 export const DesktopRendererDebugSnapshotSchema = Schema.Record(Schema.String, Schema.Unknown);
 export type DesktopRendererDebugSnapshot = typeof DesktopRendererDebugSnapshotSchema.Type;
 
+/** Renderer-visible Mac dictation settings contain no microphone audio or draft text. */
+export interface GlobalDictationSettingsState {
+  readonly enabled: boolean;
+  readonly shortcut: string;
+  readonly registered: boolean;
+  readonly error: string | null;
+}
+
+/** Selected by the native target capture, never supplied as insertion authority by a renderer. */
+export type GlobalDictationInsertionMethod = "accessibility" | "paste";
+
+export interface GlobalDictationEvent {
+  readonly type: "start" | "stop" | "review" | "cancel";
+  readonly sessionId: string;
+  readonly insertAvailable?: boolean;
+  /** Older desktop senders use the original direct Accessibility insertion path. */
+  readonly insertionMethod?: GlobalDictationInsertionMethod;
+  readonly reason?: string;
+}
+
+export interface GlobalDictationAction {
+  readonly sessionId: string;
+  readonly action: "ready" | "stop" | "review" | "cancel" | "copy" | "save" | "insert";
+  readonly text?: string;
+}
+
+export interface GlobalDictationActionResult {
+  readonly ok: boolean;
+  readonly reason?: string;
+}
+
 export interface DesktopBridge {
   openVirtualDesktop: (input: VirtualDesktopConnect) => Promise<void>;
   getAppBranding: () => DesktopAppBranding | null;
@@ -376,6 +407,14 @@ export interface DesktopBridge {
   getServerExposureState: () => Promise<DesktopServerExposureState>;
   setServerExposureMode: (mode: DesktopServerExposureMode) => Promise<DesktopServerExposureState>;
   setServerHttpsEnabled: (enabled: boolean) => Promise<DesktopServerExposureState>;
+  getGlobalDictationSettings: () => Promise<GlobalDictationSettingsState>;
+  setGlobalDictationEnabled: (enabled: boolean) => Promise<GlobalDictationSettingsState>;
+  setGlobalDictationShortcut: (shortcut: string) => Promise<GlobalDictationSettingsState>;
+  onGlobalDictationEvent: (listener: (event: GlobalDictationEvent) => void) => () => void;
+  globalDictationAction: (input: GlobalDictationAction) => Promise<GlobalDictationActionResult>;
+  /** Per-capture lease; a late release from an older route cannot free a newer microphone claim. */
+  claimComposerDictationCapture: () => Promise<string | null>;
+  releaseComposerDictationCapture: (leaseId: string) => Promise<void>;
   getAdvertisedEndpoints: () => Promise<readonly AdvertisedEndpoint[]>;
   pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
   confirm: (message: string) => Promise<boolean>;

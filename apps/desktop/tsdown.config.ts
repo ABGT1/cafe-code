@@ -18,6 +18,14 @@ export default defineConfig([
   },
   {
     ...shared,
+    // Electron's sandboxed preload has only a restricted `require`. Bundling
+    // these two entries together lets tsdown extract their shared IPC channel
+    // constants into a relative CommonJS chunk that the preload cannot load.
+    // Keep each preload in its own build so each output is self-contained.
     entry: ["src/preload.ts"],
+  },
+  {
+    ...shared,
+    entry: ["src/globalDictationPreload.ts"],
   },
 ]);

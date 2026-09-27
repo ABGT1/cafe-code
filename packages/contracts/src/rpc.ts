@@ -24,6 +24,8 @@ import {
   DictationCredentialStatus,
   DictationError,
   DictationRealtimeClientSecret,
+  DictationRewriteTextInput,
+  DictationRewriteTextResult,
   DictationSetApiKeyInput,
 } from "./dictation.ts";
 import { AuthAccessStreamEvent } from "./auth.ts";
@@ -182,6 +184,7 @@ export const WS_METHODS = {
   dictationSetApiKey: "dictation.setApiKey",
   dictationClearApiKey: "dictation.clearApiKey",
   dictationCreateClientSecret: "dictation.createClientSecret",
+  dictationRewriteText: "dictation.rewriteText",
 
   // Usage stats
   usageStatsGet: "usageStats.get",
@@ -342,6 +345,12 @@ export const WsDictationClearApiKeyRpc = Rpc.make(WS_METHODS.dictationClearApiKe
 export const WsDictationCreateClientSecretRpc = Rpc.make(WS_METHODS.dictationCreateClientSecret, {
   payload: DictationCreateClientSecretInput,
   success: DictationRealtimeClientSecret,
+  error: DictationError,
+});
+
+export const WsDictationRewriteTextRpc = Rpc.make(WS_METHODS.dictationRewriteText, {
+  payload: DictationRewriteTextInput,
+  success: DictationRewriteTextResult,
   error: DictationError,
 });
 
@@ -646,6 +655,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsDictationSetApiKeyRpc,
   WsDictationClearApiKeyRpc,
   WsDictationCreateClientSecretRpc,
+  WsDictationRewriteTextRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerGetTraceDiagnosticsRpc,
   WsServerGetProcessDiagnosticsRpc,

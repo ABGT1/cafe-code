@@ -1,7 +1,38 @@
 // @effect-diagnostics globalDate:off
 import { assert, describe, it } from "@effect/vitest";
 
-import { __desktopDebugServerTestApi as debugServer } from "./DesktopDebugServer.ts";
+import {
+  __desktopDebugServerTestApi as debugServer,
+  type GlobalDictationShortcutDebugSnapshot,
+} from "./DesktopDebugServer.ts";
+
+const makeGlobalDictationShortcutSnapshot = (
+  overrides: Partial<GlobalDictationShortcutDebugSnapshot> = {},
+): GlobalDictationShortcutDebugSnapshot => ({
+  enabled: true,
+  shortcut: "CommandOrControl+Shift+,",
+  registered: true,
+  electronRegistered: true,
+  registrationOutcome: "registered",
+  registrationCheckedAt: "2026-09-24T09:00:00.000Z",
+  invocationCount: 1,
+  lastInvokedAt: "2026-09-24T09:00:01.000Z",
+  lastToggleOutcome: "opened",
+  lastToggleAt: "2026-09-24T09:00:02.000Z",
+  panelPhase: "recording",
+  panelReady: false,
+  panelVisible: false,
+  panelLoadOutcome: "loaded",
+  lastPanelReadyOutcome: "not_seen",
+  lastPanelReadyAt: null,
+  lastCaptureOutcome: "not_attempted",
+  lastCaptureAt: null,
+  lastCaptureDurationMs: null,
+  lastInsertOutcome: "not_attempted",
+  lastInsertAt: null,
+  lastInsertDurationMs: null,
+  ...overrides,
+});
 
 const makeLargeRendererSnapshot = (index: number) => ({
   debugSnapshotVersion: 50,
@@ -365,6 +396,124 @@ const makeLargeProviderDaemonSnapshot = () => ({
 });
 
 describe("DesktopDebugServer compact snapshots", () => {
+  it("reports fixed Mac shortcut lifecycle without forwarding injected private fields", () => {
+    debugServer.reset();
+    debugServer.publishGlobalDictationShortcutSnapshot({
+      ...makeGlobalDictationShortcutSnapshot({
+        lastCaptureOutcome: "succeeded",
+        lastCaptureAt: "2026-09-24T18:00:01+09:00",
+        lastCaptureDurationMs: 31.125,
+        lastInsertOutcome: "target_changed",
+        lastInsertAt: "2026-09-24T18:00:05+09:00",
+        lastInsertDurationMs: 85.125,
+      }),
+      transcript: "private transcript must not cross this boundary",
+      target: "/private/target",
+      targetId: "private-target-identifier",
+      selectedText: "private selected field text",
+      rawNativeError: { message: "private native error" },
+    } as Parameters<typeof debugServer.publishGlobalDictationShortcutSnapshot>[0]);
+
+    const compact = debugServer.buildCompactDebugSnapshot();
+    const full = debugServer.buildFullDebugSnapshot();
+    for (const snapshot of [compact, full]) {
+      const diagnostics = snapshot.globalDictationShortcut as Record<string, unknown>;
+      assert.deepInclude(diagnostics, {
+        enabled: true,
+        shortcut: "CommandOrControl+Shift+,",
+        registered: true,
+        electronRegistered: true,
+        invocationCount: 1,
+        panelReady: false,
+        panelVisible: false,
+        panelLoadOutcome: "loaded",
+        lastCaptureOutcome: "succeeded",
+        lastCaptureAt: "2026-09-24T09:00:01.000Z",
+        lastCaptureDurationMs: 31.13,
+        lastInsertOutcome: "target_changed",
+        lastInsertAt: "2026-09-24T09:00:05.000Z",
+        lastInsertDurationMs: 85.13,
+      });
+      assert.isFalse(JSON.stringify(snapshot).includes("private transcript"));
+      assert.isFalse(JSON.stringify(snapshot).includes("/private/target"));
+      assert.isFalse(JSON.stringify(snapshot).includes("private-target-identifier"));
+      assert.isFalse(JSON.stringify(snapshot).includes("private selected field text"));
+      assert.isFalse(JSON.stringify(snapshot).includes("private native error"));
+    }
+  });
+
+  it("reports clipboard refusal without retaining clipboard contents or ownership material", () => {
+    debugServer.reset();
+    debugServer.publishGlobalDictationShortcutSnapshot({
+      ...makeGlobalDictationShortcutSnapshot({ lastInsertOutcome: "clipboard_unavailable" }),
+      clipboardSnapshot: { text: "private-clipboard-text", types: ["private-clipboard-type"] },
+      clipboardOwnershipMarker: "private-ownership-marker",
+    } as GlobalDictationShortcutDebugSnapshot);
+
+    for (const snapshot of [
+      debugServer.buildCompactDebugSnapshot(),
+      debugServer.buildFullDebugSnapshot(),
+    ]) {
+      assert.deepInclude(snapshot.globalDictationShortcut as Record<string, unknown>, {
+        lastInsertOutcome: "clipboard_unavailable",
+      });
+      assert.isFalse(JSON.stringify(snapshot.globalDictationShortcut).includes("private-"));
+    }
+  });
+
+  it("rejects private text injected into target outcome or timing fields", () => {
+    debugServer.reset();
+    debugServer.publishGlobalDictationShortcutSnapshot({
+      ...makeGlobalDictationShortcutSnapshot(),
+      lastCaptureOutcome: "private-captured-field-value",
+      lastCaptureAt: "private-original-field-path",
+      lastCaptureDurationMs: "private-selected-text",
+      lastInsertOutcome: { message: "private-native-output" },
+      lastInsertAt: { targetId: "private-target-id" },
+      lastInsertDurationMs: { token: "private-helper-capability" },
+    } as unknown as GlobalDictationShortcutDebugSnapshot);
+
+    for (const snapshot of [
+      debugServer.buildCompactDebugSnapshot(),
+      debugServer.buildFullDebugSnapshot(),
+    ]) {
+      assert.deepInclude(snapshot.globalDictationShortcut as Record<string, unknown>, {
+        lastCaptureOutcome: "helper_protocol_error",
+        lastCaptureAt: null,
+        lastCaptureDurationMs: null,
+        lastInsertOutcome: "helper_protocol_error",
+        lastInsertAt: null,
+        lastInsertDurationMs: null,
+      });
+      assert.isFalse(JSON.stringify(snapshot.globalDictationShortcut).includes("private-"));
+    }
+  });
+
+  it("bounds target operation durations and retains an explicit unattempted state", () => {
+    debugServer.reset();
+    for (const duration of [null, -1, Number.NaN, Number.POSITIVE_INFINITY, 86_400_001]) {
+      debugServer.publishGlobalDictationShortcutSnapshot(
+        makeGlobalDictationShortcutSnapshot({
+          lastCaptureDurationMs: duration,
+          lastInsertDurationMs: duration,
+        }),
+      );
+      for (const snapshot of [
+        debugServer.buildCompactDebugSnapshot(),
+        debugServer.buildFullDebugSnapshot(),
+      ]) {
+        assert.deepInclude(snapshot.globalDictationShortcut as Record<string, unknown>, {
+          lastCaptureOutcome: "not_attempted",
+          lastCaptureAt: null,
+          lastCaptureDurationMs: null,
+          lastInsertOutcome: "not_attempted",
+          lastInsertAt: null,
+          lastInsertDurationMs: null,
+        });
+      }
+    }
+  });
+
   it("keeps default debug bounded and strips long-running prompt/output previews", () => {
     debugServer.reset();
     for (let index = 0; index < 25; index += 1) {

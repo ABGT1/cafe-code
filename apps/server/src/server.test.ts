@@ -2701,6 +2701,21 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             });
             const reread = yield* client[WS_METHODS.dictationGetStatus]({});
             const cleared = yield* client[WS_METHODS.dictationClearApiKey]({});
+            // A valid custom request must reach the service intact. No key is
+            // configured here, so this proves forwarding without a paid call;
+            // dropping instructions at the WS boundary would be invalid_input.
+            const customWithoutKey = yield* Effect.flip(
+              client[WS_METHODS.dictationRewriteText]({
+                text: "A synthetic draft.",
+                style: "custom",
+                instructions: "Friendly and concise.",
+                consent: true,
+              }),
+            );
+            assert.strictEqual(
+              "code" in customWithoutKey && customWithoutKey.code,
+              "not_configured",
+            );
             return { initial, configured, reread, cleared };
           }),
         ),
@@ -2711,6 +2726,44 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.deepStrictEqual(states.reread, { configured: true, canManage: true });
       assert.deepStrictEqual(states.cleared, { configured: false, canManage: true });
       assert.notInclude(JSON.stringify(states), permanentKey);
+    }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
+  );
+
+  it.effect("rejects style rewrites from a paired non-owner before provider access", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const pairing = yield* HttpClient.post("/api/auth/pairing-token", {
+        headers: { cookie: yield* getAuthenticatedSessionCookieHeader() },
+      });
+      const { credential } = (yield* pairing.json) as { credential: string };
+      const cookie = yield* getAuthenticatedSessionCookieHeader(credential);
+      const wsUrl = appendSessionCookieToWsUrl(
+        yield* getWsServerUrl("/ws", { authenticated: false }),
+        cookie,
+      );
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.gen(function* () {
+            const error = yield* Effect.flip(
+              client[WS_METHODS.dictationRewriteText]({
+                text: "private draft that must not reach OpenAI",
+                style: "formal",
+                consent: true,
+              }),
+            );
+            assert.strictEqual("code" in error && error.code, "not_authorized");
+            const customError = yield* Effect.flip(
+              client[WS_METHODS.dictationRewriteText]({
+                text: "private draft that must not reach OpenAI",
+                style: "custom",
+                instructions: "Use friendly short sentences.",
+                consent: true,
+              }),
+            );
+            assert.strictEqual("code" in customError && customError.code, "not_authorized");
+          }),
+        ),
+      );
     }).pipe(Effect.provide(makeProductionHttpServerTestLayer())),
   );
 

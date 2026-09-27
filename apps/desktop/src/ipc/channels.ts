@@ -31,6 +31,14 @@ export const REMOVE_SAVED_ENVIRONMENT_SECRET_CHANNEL = "desktop:remove-saved-env
 export const GET_SERVER_EXPOSURE_STATE_CHANNEL = "desktop:get-server-exposure-state";
 export const SET_SERVER_EXPOSURE_MODE_CHANNEL = "desktop:set-server-exposure-mode";
 export const SET_SERVER_HTTPS_ENABLED_CHANNEL = "desktop:set-server-https-enabled";
+export const GET_GLOBAL_DICTATION_SETTINGS_CHANNEL = "desktop:global-dictation-get-settings";
+export const SET_GLOBAL_DICTATION_ENABLED_CHANNEL = "desktop:global-dictation-set-enabled";
+export const SET_GLOBAL_DICTATION_SHORTCUT_CHANNEL = "desktop:global-dictation-set-shortcut";
+export const GLOBAL_DICTATION_EVENT_CHANNEL = "desktop:global-dictation-event";
+export const GLOBAL_DICTATION_ACTION_CHANNEL = "desktop:global-dictation-action";
+export const CLAIM_COMPOSER_DICTATION_CAPTURE_CHANNEL = "desktop:dictation-claim-composer-capture";
+export const RELEASE_COMPOSER_DICTATION_CAPTURE_CHANNEL =
+  "desktop:dictation-release-composer-capture";
 export const GET_ADVERTISED_ENDPOINTS_CHANNEL = "desktop:get-advertised-endpoints";
 
 export const OPEN_VIRTUAL_DESKTOP_CHANNEL = "desktop:open-virtual-desktop";

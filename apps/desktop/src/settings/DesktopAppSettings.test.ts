@@ -19,6 +19,8 @@ const DesktopSettingsPatch = Schema.Struct({
   serverHttpsEnabled: Schema.optionalKey(Schema.Boolean),
   updateChannel: Schema.optionalKey(Schema.Literals(["latest", "nightly"])),
   updateChannelConfiguredByUser: Schema.optionalKey(Schema.Boolean),
+  globalDictationEnabled: Schema.optionalKey(Schema.Boolean),
+  globalDictationShortcut: Schema.optionalKey(Schema.String),
 });
 
 const decodeDesktopSettingsPatch = Schema.decodeEffect(Schema.fromJsonString(DesktopSettingsPatch));
@@ -92,6 +94,8 @@ describe("DesktopSettings", () => {
       serverHttpsEnabled: true,
       updateChannel: "nightly",
       updateChannelConfiguredByUser: false,
+      globalDictationEnabled: false,
+      globalDictationShortcut: "CommandOrControl+Shift+,",
     } satisfies DesktopSettingsValue);
   });
 
@@ -104,6 +108,8 @@ describe("DesktopSettings", () => {
           serverHttpsEnabled: false,
           updateChannel: "latest",
           updateChannelConfiguredByUser: true,
+          globalDictationEnabled: false,
+          globalDictationShortcut: "CommandOrControl+Shift+,",
         });
 
         assert.deepEqual(yield* settings.load, {
@@ -111,6 +117,8 @@ describe("DesktopSettings", () => {
           serverHttpsEnabled: false,
           updateChannel: "latest",
           updateChannelConfiguredByUser: true,
+          globalDictationEnabled: false,
+          globalDictationShortcut: "CommandOrControl+Shift+,",
         } satisfies DesktopSettingsValue);
 
         const exposure = yield* settings.setServerExposureMode("local-only");
@@ -181,6 +189,8 @@ describe("DesktopSettings", () => {
           serverHttpsEnabled: true,
           updateChannel: "latest",
           updateChannelConfiguredByUser: false,
+          globalDictationEnabled: false,
+          globalDictationShortcut: "CommandOrControl+Shift+,",
         } satisfies DesktopSettingsValue);
       }),
     ),
@@ -238,6 +248,8 @@ describe("DesktopSettings", () => {
           serverHttpsEnabled: true,
           updateChannel: "nightly",
           updateChannelConfiguredByUser: false,
+          globalDictationEnabled: false,
+          globalDictationShortcut: "CommandOrControl+Shift+,",
         } satisfies DesktopSettingsValue);
       }),
       { appVersion: "0.0.17-nightly.20260415.1" },
@@ -252,6 +264,8 @@ describe("DesktopSettings", () => {
           serverExposureMode: "local-only",
           updateChannel: "latest",
           updateChannelConfiguredByUser: true,
+          globalDictationEnabled: false,
+          globalDictationShortcut: "CommandOrControl+Shift+,",
         });
 
         assert.deepEqual(yield* settings.load, {
@@ -259,9 +273,62 @@ describe("DesktopSettings", () => {
           serverHttpsEnabled: true,
           updateChannel: "latest",
           updateChannelConfiguredByUser: true,
+          globalDictationEnabled: false,
+          globalDictationShortcut: "CommandOrControl+Shift+,",
         } satisfies DesktopSettingsValue);
       }),
       { appVersion: "0.0.17-nightly.20260415.1" },
+    ),
+  );
+
+  it.effect("persists opt-in dictation and a validated shortcut", () =>
+    withSettings(
+      Effect.gen(function* () {
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const settings = yield* DesktopAppSettings.DesktopAppSettings;
+
+        assert.isTrue((yield* settings.setGlobalDictationEnabled(true)).changed);
+        assert.isTrue((yield* settings.setGlobalDictationShortcut("Command+Shift+D")).changed);
+        assert.isFalse((yield* settings.setGlobalDictationShortcut("CmdOrCtrl+Shift+D")).changed);
+        assert.deepEqual(
+          yield* decodeDesktopSettingsPatch(
+            yield* fileSystem.readFileString(environment.desktopSettingsPath),
+          ),
+          {
+            globalDictationEnabled: true,
+            globalDictationShortcut: "CommandOrControl+Shift+D",
+          },
+        );
+      }),
+    ),
+  );
+
+  it.effect("rejects unsafe shortcuts and heals invalid persisted values", () =>
+    withSettings(
+      Effect.gen(function* () {
+        const settings = yield* DesktopAppSettings.DesktopAppSettings;
+        assert.isTrue(
+          yield* settings.setGlobalDictationShortcut("Command+K").pipe(
+            Effect.as(false),
+            Effect.catch(() => Effect.succeed(true)),
+          ),
+        );
+        assert.isTrue(
+          yield* settings.setGlobalDictationShortcut("Shift+D").pipe(
+            Effect.as(false),
+            Effect.catch(() => Effect.succeed(true)),
+          ),
+        );
+
+        yield* writeSettingsPatch({
+          globalDictationEnabled: true,
+          globalDictationShortcut: "Command+K",
+        });
+        const loaded = yield* settings.load;
+        assert.isTrue(loaded.globalDictationEnabled);
+        assert.equal(loaded.globalDictationShortcut, "CommandOrControl+Shift+,");
+      }),
     ),
   );
 });

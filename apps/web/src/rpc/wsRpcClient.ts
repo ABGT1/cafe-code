@@ -104,6 +104,7 @@ export interface WsRpcClient {
     readonly createClientSecret: (
       input?: RpcInput<typeof WS_METHODS.dictationCreateClientSecret>,
     ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.dictationCreateClientSecret>>;
+    readonly rewriteText: RpcUnaryMethod<typeof WS_METHODS.dictationRewriteText>;
   };
   readonly server: {
     readonly usageReset: RpcUnaryMethod<typeof WS_METHODS.serverUsageReset>;
@@ -263,6 +264,12 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
           client[WS_METHODS.dictationCreateClientSecret](input).pipe(
             Effect.withTracerEnabled(false),
           ),
+        ),
+      rewriteText: (input) =>
+        transport.request((client) =>
+          // Original transcript content crosses this separately consented RPC.
+          // Never attach a text-bearing request to ordinary client traces.
+          client[WS_METHODS.dictationRewriteText](input).pipe(Effect.withTracerEnabled(false)),
         ),
     },
     server: {

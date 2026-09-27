@@ -36,6 +36,22 @@ export class ElectronWindow extends Context.Service<ElectronWindow, ElectronWind
   "cafecode/desktop/electron/Window",
 ) {}
 
+/**
+ * The global dictation panel is a BrowserWindow but never a Cafe main window.
+ * Keep this role marker outside the generic Effect service so the main-window
+ * fallback and theme synchronization cannot accidentally select the panel
+ * after the normal window is closed on macOS.
+ */
+const auxiliaryWindows = new WeakSet<Electron.BrowserWindow>();
+
+export function markAuxiliaryWindow(window: Electron.BrowserWindow): void {
+  auxiliaryWindows.add(window);
+}
+
+function isLiveMainCandidate(window: Electron.BrowserWindow): boolean {
+  return !window.isDestroyed() && !auxiliaryWindows.has(window);
+}
+
 const make = Effect.gen(function* () {
   const mainWindowRef = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
 
@@ -49,14 +65,14 @@ const make = Effect.gen(function* () {
       return main;
     }
 
-    return Option.fromNullishOr(Electron.BrowserWindow.getAllWindows()[0] ?? null).pipe(
-      Option.filter((window) => !window.isDestroyed()),
+    return Option.fromNullishOr(
+      Electron.BrowserWindow.getAllWindows().find(isLiveMainCandidate) ?? null,
     );
   });
 
   const focusedMainOrFirst = Effect.sync(() =>
     Option.fromNullishOr(Electron.BrowserWindow.getFocusedWindow() ?? null).pipe(
-      Option.filter((window) => !window.isDestroyed()),
+      Option.filter(isLiveMainCandidate),
     ),
   ).pipe(
     Effect.flatMap((focused) =>
@@ -107,7 +123,7 @@ const make = Effect.gen(function* () {
     sendAll: (channel, ...args) =>
       Effect.sync(() => {
         for (const window of Electron.BrowserWindow.getAllWindows()) {
-          if (window.isDestroyed()) {
+          if (!isLiveMainCandidate(window)) {
             continue;
           }
           window.webContents.send(channel, ...args);
@@ -123,7 +139,7 @@ const make = Effect.gen(function* () {
     ) {
       const windows = Electron.BrowserWindow.getAllWindows();
       for (const window of windows) {
-        if (window.isDestroyed()) {
+        if (!isLiveMainCandidate(window)) {
           continue;
         }
         yield* sync(window);

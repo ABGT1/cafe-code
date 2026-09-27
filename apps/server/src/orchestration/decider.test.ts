@@ -15,12 +15,14 @@ import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vitest";
 
 import { decideOrchestrationCommand } from "./decider.ts";
+import { sessionLifecycleSnapshot, SESSION_LIFECYCLE_SUPERSEDED } from "./sessionLifecycle.ts";
 
 const now = "2026-09-23T10:43:00.000Z";
 const threadId = ThreadId.make("root-replacement-thread");
 const oldRoot = TurnId.make("completed-root");
 const newRoot = TurnId.make("replacement-root");
 const instanceId = ProviderInstanceId.make("codex");
+const decodeClientCommand = Schema.decodeUnknownSync(ClientOrchestrationCommand);
 
 function makeThread(): OrchestrationThread {
   return {
@@ -181,6 +183,64 @@ describe("Codex completed-root replacement admission", () => {
   });
 
   it("does not expose session-set or replacement authority through the client command schema", () => {
-    expect(() => Schema.decodeUnknownSync(ClientOrchestrationCommand)(makeCommand())).toThrow();
+    expect(() => decodeClientCommand(makeCommand())).toThrow();
+  });
+});
+
+describe("Provider observation lifecycle admission", () => {
+  function completionCommand() {
+    const thread = makeThread();
+    return {
+      type: "thread.session.set" as const,
+      commandId: CommandId.make("provider:observed-terminal"),
+      threadId,
+      expectedSessionLifecycle: sessionLifecycleSnapshot(thread.session),
+      session: { ...thread.session!, status: "ready" as const, activeTurnId: null },
+      // An authoritative provider completion may have an older clock than
+      // Cafe's ACK. Equality of the observed state, not wall-clock order, owns
+      // admission, so this legitimate terminal transition must remain valid.
+      createdAt: "2026-09-23T10:42:59.000Z",
+    };
+  }
+
+  it("accepts the unchanged lifecycle without persisting the server-only guard", async () => {
+    const event = await Effect.runPromise(decide(makeThread(), completionCommand()));
+    expect(event).toMatchObject({
+      type: "thread.session-set",
+      payload: { session: { status: "ready", activeTurnId: null } },
+    });
+    expect(event).not.toHaveProperty("payload.expectedSessionLifecycle");
+    expect(() => decodeClientCommand(completionCommand())).toThrow();
+  });
+
+  it("allows the exact active turn to finish after a newer same-turn heartbeat", async () => {
+    const thread = makeThread();
+    const event = await Effect.runPromise(
+      decide(
+        {
+          ...thread,
+          session: { ...thread.session!, updatedAt: "2026-09-23T10:44:00.000Z" },
+        },
+        completionCommand(),
+      ),
+    );
+    expect(event).toMatchObject({ payload: { session: { status: "ready", activeTurnId: null } } });
+  });
+
+  it.each([
+    ["accepted newer turn", { activeTurnId: newRoot }],
+    ["Stop", { status: "interrupted" as const, activeTurnId: null }],
+    ["new start intent", { status: "starting" as const, activeTurnId: null }],
+    ["changed runtime", { providerInstanceId: ProviderInstanceId.make("another-instance") }],
+    ["changed driver", { providerName: "claude" }],
+  ])("rejects an observation superseded by %s", async (_label, change) => {
+    const original = makeThread();
+    const result = await Effect.runPromise(
+      Effect.exit(
+        decide({ ...original, session: { ...original.session!, ...change } }, completionCommand()),
+      ),
+    );
+    expect(result).toMatchObject({ _tag: "Failure" });
+    expect(JSON.stringify(result)).toContain(SESSION_LIFECYCLE_SUPERSEDED);
   });
 });

@@ -1,6 +1,6 @@
 # Provider stream reconciliation
 
-Last updated: 2026-09-10 11:58:47 JST (UTC+0900)
+Last updated: 2026-09-24 21:09:55 JST (UTC+0900)
 
 ## Ownership and exact text
 
@@ -11,6 +11,16 @@ Ingestion commits every observed UTF-16 code unit with a fixed-memory SHA-256 co
 Codex `item/agentMessage/delta` and `item/completed` must preserve identical source text. `CodexAdapter.itemDetail` may check whether an `agentMessage` is blank, but must not trim a nonblank message. One removed trailing newline is enough to invalidate an otherwise complete stream commitment. In the observed failure, the native completion matched all streamed text; trimming caused the final replacement to be rejected, leaving an older terminal message with only its first projected chunk. The fix preserves source whitespace rather than weakening the commitment or hiding short output.
 
 Source: [official Codex app-server item lifecycle](https://learn.chatgpt.com/docs/app-server#items). The exact-prefix guard is Cafe's persistence integrity boundary, not an upstream claim.
+
+## Resume history must not complete newer work
+
+Provider ingestion and accepted user starts use different asynchronous lanes. Checking a thread before dispatching its session update is insufficient: a new turn ACK can arrive between that read and serialized command admission. A completed turn from a resume snapshot could then set the session to ready with no active turn, accidentally closing the newly accepted turn while its output continued streaming.
+
+Terminal, idle, startup-settlement, goal-settlement and runtime-error observations now include a server-only `expectedSessionLifecycle` tuple. The decider compares that tuple against the current lifecycle under serialized admission. If a newer lifecycle won, the old mutation receives a fixed benign rejection; ingestion still processes its scoped content and receipt. Only heartbeat clock changes for the same concrete active turn are tolerated, so real completions are not discarded just because a heartbeat ran. This internal admission guard is not persisted in public events or accepted from renderer commands.
+
+Already-terminal historical starts/completions cannot consume a newer pending start. An exact indexed turn lookup supplies that fact without a transcript scan. Session-ready initialization metadata cannot clear a concrete active turn. Positive provider starts and independently verified ownership recovery keep their existing authority; generic output and historical replay do not gain authority to reopen terminal work, bypass Stop, or restart providers.
+
+This prevents future stale lifecycle mutations. It does not rewrite an already-damaged session, repair arbitrary historical state, or promise that every current native process is alive. Current live state must be verified independently before any recovery.
 
 ## Claude block snapshots and compatibility
 
@@ -35,6 +45,7 @@ Use the repository-pinned Node runtime and Yarn through Corepack, with the check
 - `yarn workspace @cafeai/cafe-code test src/provider/Layers/CodexAdapter.test.ts`: exact leading/trailing whitespace, CRLF, whitespace-only suppression and strict streamed-prefix compatibility.
 - `yarn workspace @cafeai/cafe-code test src/provider/Layers/ClaudeAdapter.test.ts`: multiple block snapshots sharing an API message id, reused block indexes, duplicate wrappers, partial/no-delta repair, split surrogates and cross-message/prefix rejection.
 - `yarn workspace @cafeai/cafe-code test src/orchestration/Layers/ProviderRuntimeIngestion.test.ts`: late old-turn exact completion restores full text without disturbing a newer active turn or timestamps; replay is idempotent, mismatches retain streamed text and diagnostics remain content-free.
+- `yarn workspace @cafeai/cafe-code test src/orchestration/decider.test.ts src/orchestration/Layers/ProviderRuntimeIngestion.test.ts`: stale observations racing accepted new turns, historical resume start/completion, readiness while active, genuine completion across heartbeat-only changes, and exact rejection behavior on replay.
 - Run `yarn fmt`, `yarn lint`, `yarn typecheck`, and `yarn test`, followed by `yarn build:desktop --force` after tests. A successful build does not replace the already-running desktop/daemon processes; applying it requires the normal app restart lifecycle.
 
 These are corrections within the existing adapter/ingestion/projection contracts. They add no public protocol, persistence migration, provider inference or new repair authority.

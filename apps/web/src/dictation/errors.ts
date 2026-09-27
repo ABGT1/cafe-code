@@ -8,6 +8,7 @@ import type { DictationErrorCode } from "@cafecode/contracts";
  */
 export const DICTATION_RPC_ERROR_MESSAGES: Readonly<Record<DictationErrorCode, string>> = {
   insecure_transport: "Dictation requires HTTPS or a same-machine Cafe connection.",
+  invalid_input: "The draft is empty or too long to rewrite. Edit it and try again.",
   not_authorized: "This Cafe connection is not allowed to start dictation.",
   not_configured: "Dictation is not configured on this Cafe server.",
   rate_limited: "Dictation was started too frequently. Please wait a moment and try again.",
@@ -34,6 +35,7 @@ export function readDictationRpcErrorCode(error: unknown): DictationErrorCode | 
     case "not_configured":
     case "not_authorized":
     case "insecure_transport":
+    case "invalid_input":
     case "rate_limited":
     case "secret_store_failed":
     case "upstream_auth_failed":

@@ -276,6 +276,7 @@ describe("RpcInstrumentation", () => {
         WS_METHODS.dictationSetApiKey,
         WS_METHODS.dictationClearApiKey,
         WS_METHODS.dictationCreateClientSecret,
+        WS_METHODS.dictationRewriteText,
       ]) {
         const spanNames = yield* collectSpanNames(
           observeRpcEffect(

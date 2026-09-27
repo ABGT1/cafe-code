@@ -4,6 +4,8 @@ import * as Schema from "effect/Schema";
 
 import {
   DICTATION_API_KEY_MAX_CHARS,
+  DICTATION_REWRITE_INPUT_MAX_CHARS,
+  DICTATION_REWRITE_INSTRUCTIONS_MAX_CHARS,
   DICTATION_SESSION_PROFILE,
   DictationApiKey,
   DictationCreateClientSecretInput,
@@ -11,6 +13,8 @@ import {
   DictationProviderErrorCode,
   DictationProviderErrorType,
   DictationRealtimeClientSecret,
+  DictationRewriteTextInput,
+  DictationRewriteTextResult,
 } from "./dictation.ts";
 
 const decodeDictationApiKey = Schema.decodeUnknownEffect(DictationApiKey);
@@ -21,10 +25,60 @@ const decodeDictationRealtimeClientSecret = Schema.decodeUnknownEffect(
   DictationRealtimeClientSecret,
 );
 const decodeDictationErrorCode = Schema.decodeUnknownEffect(DictationErrorCode);
+const decodeRewriteTextInput = Schema.decodeUnknownEffect(DictationRewriteTextInput);
+const decodeRewriteTextResult = Schema.decodeUnknownEffect(DictationRewriteTextResult);
 const decodeDictationProviderErrorType = Schema.decodeUnknownEffect(DictationProviderErrorType);
 const decodeDictationProviderErrorCode = Schema.decodeUnknownEffect(DictationProviderErrorCode);
 
 describe("dictation contracts", () => {
+  it.effect("requires an explicitly consented, bounded Formal rewrite", () =>
+    Effect.gen(function* () {
+      assert.deepStrictEqual(
+        yield* decodeRewriteTextInput({ text: "Draft text", style: "formal", consent: true }),
+        { text: "Draft text", style: "formal", consent: true },
+      );
+      for (const invalid of [
+        { text: "Draft text", style: "formal", consent: false },
+        { text: "Draft text", style: "formal" },
+        { text: "Draft text", style: "creative", consent: true },
+        { text: "", style: "formal", consent: true },
+        { text: "x".repeat(DICTATION_REWRITE_INPUT_MAX_CHARS + 1), style: "formal", consent: true },
+      ]) {
+        assert.isTrue(
+          yield* decodeRewriteTextInput(invalid).pipe(
+            Effect.match({ onFailure: () => true, onSuccess: () => false }),
+          ),
+        );
+      }
+      assert.deepStrictEqual(yield* decodeRewriteTextResult({ text: "Revised text." }), {
+        text: "Revised text.",
+      });
+    }),
+  );
+  it.effect("requires bounded custom style instructions and consent", () =>
+    Effect.gen(function* () {
+      const custom = {
+        text: "Draft text",
+        style: "custom",
+        instructions: "Friendly and concise, with short paragraphs.",
+        consent: true,
+      } as const;
+      assert.deepStrictEqual(yield* decodeRewriteTextInput(custom), custom);
+      for (const invalid of [
+        { ...custom, instructions: undefined },
+        { ...custom, instructions: "   " },
+        { ...custom, instructions: "x".repeat(DICTATION_REWRITE_INSTRUCTIONS_MAX_CHARS + 1) },
+        { ...custom, consent: false },
+        { ...custom, style: "execute" },
+      ]) {
+        assert.isTrue(
+          yield* decodeRewriteTextInput(invalid).pipe(
+            Effect.match({ onFailure: () => true, onSuccess: () => false }),
+          ),
+        );
+      }
+    }),
+  );
   it.effect("trims valid API keys and rejects control characters", () =>
     Effect.gen(function* () {
       assert.strictEqual(yield* decodeDictationApiKey("  sk-test  "), "sk-test");

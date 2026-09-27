@@ -25,6 +25,9 @@ export interface DesktopSettings {
   readonly serverHttpsEnabled: boolean;
   readonly updateChannel: DesktopUpdateChannel;
   readonly updateChannelConfiguredByUser: boolean;
+  /** Mac global dictation is deliberately opt-in and remains disabled on fresh installs. */
+  readonly globalDictationEnabled: boolean;
+  readonly globalDictationShortcut: string;
 }
 
 export interface DesktopSettingsChange {
@@ -37,13 +40,30 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   serverHttpsEnabled: true,
   updateChannel: "latest",
   updateChannelConfiguredByUser: false,
+  globalDictationEnabled: false,
+  globalDictationShortcut: "CommandOrControl+Shift+,",
 };
+
+/**
+ * Keep a bounded accelerator grammar at the persistence boundary. Global
+ * shortcuts preempt other applications, so an unmodified or partially modified
+ * key must never be accepted from a renderer or a hand-edited settings file.
+ * The physical key list intentionally matches the settings key capture UI.
+ */
+export function normalizeGlobalDictationShortcut(value: string): string | null {
+  const match = /^(?:CommandOrControl|CmdOrCtrl|Command|Cmd)\+Shift\+([A-Z0-9,./;\-=])$/i.exec(
+    value,
+  );
+  return match ? `CommandOrControl+Shift+${match[1]?.toUpperCase()}` : null;
+}
 
 const DesktopSettingsDocument = Schema.Struct({
   serverExposureMode: Schema.optionalKey(DesktopServerExposureModeSchema),
   serverHttpsEnabled: Schema.optionalKey(Schema.Boolean),
   updateChannel: Schema.optionalKey(DesktopUpdateChannelSchema),
   updateChannelConfiguredByUser: Schema.optionalKey(Schema.Boolean),
+  globalDictationEnabled: Schema.optionalKey(Schema.Boolean),
+  globalDictationShortcut: Schema.optionalKey(Schema.String),
 });
 
 type DesktopSettingsDocument = typeof DesktopSettingsDocument.Type;
@@ -66,6 +86,14 @@ export class DesktopSettingsWriteError extends Data.TaggedError("DesktopSettings
   }
 }
 
+export class GlobalDictationShortcutError extends Data.TaggedError(
+  "GlobalDictationShortcutError",
+)<{}> {
+  override get message() {
+    return "Use Command–Shift with a letter, number, or supported punctuation key.";
+  }
+}
+
 export interface DesktopAppSettingsShape {
   readonly load: Effect.Effect<DesktopSettings>;
   readonly get: Effect.Effect<DesktopSettings>;
@@ -78,6 +106,15 @@ export interface DesktopAppSettingsShape {
   readonly setUpdateChannel: (
     channel: DesktopUpdateChannel,
   ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
+  readonly setGlobalDictationEnabled: (
+    enabled: boolean,
+  ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
+  readonly setGlobalDictationShortcut: (
+    shortcut: string,
+  ) => Effect.Effect<
+    DesktopSettingsChange,
+    DesktopSettingsWriteError | GlobalDictationShortcutError
+  >;
 }
 
 export class DesktopAppSettings extends Context.Service<
@@ -111,6 +148,11 @@ function normalizeDesktopSettingsDocument(
       ? Option.getOrElse(parsedUpdateChannel, () => defaultSettings.updateChannel)
       : defaultSettings.updateChannel,
     updateChannelConfiguredByUser,
+    globalDictationEnabled: parsed.globalDictationEnabled === true,
+    globalDictationShortcut:
+      (parsed.globalDictationShortcut &&
+        normalizeGlobalDictationShortcut(parsed.globalDictationShortcut)) ||
+      defaultSettings.globalDictationShortcut,
   };
 }
 
@@ -131,6 +173,12 @@ function toDesktopSettingsDocument(
   }
   if (settings.updateChannelConfiguredByUser !== defaults.updateChannelConfiguredByUser) {
     document.updateChannelConfiguredByUser = settings.updateChannelConfiguredByUser;
+  }
+  if (settings.globalDictationEnabled !== defaults.globalDictationEnabled) {
+    document.globalDictationEnabled = settings.globalDictationEnabled;
+  }
+  if (settings.globalDictationShortcut !== defaults.globalDictationShortcut) {
+    document.globalDictationShortcut = settings.globalDictationShortcut;
   }
 
   return document;
@@ -168,6 +216,18 @@ function setUpdateChannel(
         updateChannel: requestedChannel,
         updateChannelConfiguredByUser: true,
       };
+}
+
+function setGlobalDictationEnabled(settings: DesktopSettings, enabled: boolean): DesktopSettings {
+  return settings.globalDictationEnabled === enabled
+    ? settings
+    : { ...settings, globalDictationEnabled: enabled };
+}
+
+function setGlobalDictationShortcut(settings: DesktopSettings, shortcut: string): DesktopSettings {
+  return settings.globalDictationShortcut === shortcut
+    ? settings
+    : { ...settings, globalDictationShortcut: shortcut };
 }
 
 function readSettings(
@@ -261,6 +321,20 @@ export const layer = Layer.effect(
         persist((settings) => setUpdateChannel(settings, channel)).pipe(
           Effect.withSpan("desktop.settings.setUpdateChannel", { attributes: { channel } }),
         ),
+      setGlobalDictationEnabled: (enabled) =>
+        persist((settings) => setGlobalDictationEnabled(settings, enabled)).pipe(
+          Effect.withSpan("desktop.settings.setGlobalDictationEnabled", {
+            attributes: { enabled },
+          }),
+        ),
+      setGlobalDictationShortcut: (shortcut) => {
+        const normalized = normalizeGlobalDictationShortcut(shortcut);
+        return normalized === null
+          ? Effect.fail(new GlobalDictationShortcutError())
+          : persist((settings) => setGlobalDictationShortcut(settings, normalized)).pipe(
+              Effect.withSpan("desktop.settings.setGlobalDictationShortcut"),
+            );
+      },
     });
   }),
 );
@@ -290,6 +364,14 @@ export const layerTest = (initialSettings: DesktopSettings = DEFAULT_DESKTOP_SET
         setServerHttpsEnabled: (enabled) =>
           update((settings) => setServerHttpsEnabled(settings, enabled)),
         setUpdateChannel: (channel) => update((settings) => setUpdateChannel(settings, channel)),
+        setGlobalDictationEnabled: (enabled) =>
+          update((settings) => setGlobalDictationEnabled(settings, enabled)),
+        setGlobalDictationShortcut: (shortcut) => {
+          const normalized = normalizeGlobalDictationShortcut(shortcut);
+          return normalized === null
+            ? Effect.fail(new GlobalDictationShortcutError())
+            : update((settings) => setGlobalDictationShortcut(settings, normalized));
+        },
       });
     }),
   );

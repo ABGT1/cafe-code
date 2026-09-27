@@ -278,6 +278,7 @@ const DICTATION_ERROR_CODES: ReadonlySet<string> = new Set([
   "not_configured",
   "not_authorized",
   "insecure_transport",
+  "invalid_input",
   "rate_limited",
   "secret_store_failed",
   "upstream_auth_failed",

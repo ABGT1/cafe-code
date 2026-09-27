@@ -1286,6 +1286,18 @@ const makeWsRpcLayer = (
               ),
             ),
           ),
+        [WS_METHODS.dictationRewriteText]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.dictationRewriteText,
+            Effect.all([requireSecureDictationTransport, requireDictationOwner]).pipe(
+              Effect.flatMap(() =>
+                dictation.rewriteText({
+                  ...input,
+                  safetyIdentifier: dictationSafetyIdentifier,
+                }),
+              ),
+            ),
+          ),
         [WS_METHODS.usageStatsGet]: (_input) =>
           observeRpcEffect(WS_METHODS.usageStatsGet, usageStats.get, {
             "rpc.aggregate": "server",

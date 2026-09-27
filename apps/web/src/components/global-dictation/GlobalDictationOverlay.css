@@ -1,0 +1,572 @@
+/* The dedicated Electron panel is small; one static backdrop filter is enough
+   for a glass feel without a full-window animated blur or WebGL scene. */
+html:has(.cafe-global-dictation),
+body:has(.cafe-global-dictation) {
+  background: transparent !important;
+}
+
+.cafe-global-dictation {
+  --gd-white: #f7fbff;
+  --gd-muted: #a9b4c4;
+  --gd-edge: rgba(236, 246, 255, 0.19);
+  --gd-cyan: #8fe7f4;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  padding: 9px;
+  color: var(--gd-white);
+  font-family:
+    Inter,
+    ui-sans-serif,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  -webkit-app-region: no-drag;
+}
+
+.cafe-global-dictation *,
+.cafe-global-dictation *::before,
+.cafe-global-dictation *::after {
+  box-sizing: border-box;
+}
+
+.cafe-global-dictation__glass {
+  position: relative;
+  isolation: isolate;
+  width: 100%;
+  height: 100%;
+  max-height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--gd-edge);
+  border-radius: 27px;
+  background:
+    radial-gradient(ellipse at 14% -14%, rgba(118, 202, 237, 0.17), transparent 52%),
+    linear-gradient(145deg, rgba(31, 39, 48, 0.92), rgba(18, 23, 30, 0.87));
+  box-shadow:
+    0 22px 55px rgba(0, 0, 0, 0.32),
+    inset 0 1px rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(18px) saturate(1.1);
+  -webkit-backdrop-filter: blur(18px) saturate(1.1);
+}
+
+.cafe-global-dictation__chrome {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 39px;
+  gap: 10px;
+}
+
+.cafe-global-dictation__brand {
+  color: #b5c3d2;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.17em;
+  text-transform: uppercase;
+}
+
+.cafe-global-dictation__icon-button,
+.cafe-global-dictation__chrome-spacer {
+  display: inline-flex;
+  width: 31px;
+  height: 31px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.cafe-global-dictation__icon-button {
+  border: 1px solid rgba(233, 244, 255, 0.18);
+  border-radius: 50%;
+  background: rgba(230, 241, 251, 0.11);
+  color: #e6f1fa;
+  cursor: pointer;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease;
+}
+
+.cafe-global-dictation__icon-button:hover,
+.cafe-global-dictation__icon-button[aria-pressed="true"] {
+  border-color: rgba(169, 234, 248, 0.55);
+  background: rgba(142, 225, 244, 0.19);
+}
+
+.cafe-global-dictation button:focus-visible,
+.cafe-global-dictation textarea:focus-visible {
+  outline: 2px solid var(--gd-cyan);
+  outline-offset: 2px;
+}
+
+.cafe-global-dictation button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.cafe-global-dictation__subtle {
+  margin: 0;
+  color: var(--gd-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.cafe-global-dictation__recording {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  justify-content: space-between;
+  overflow-y: auto;
+  padding: 14px 17px 17px;
+}
+
+.cafe-global-dictation__recording-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 8px 8px 12px;
+  text-align: center;
+}
+
+.cafe-global-dictation__recording-orb {
+  display: flex;
+  width: 45px;
+  height: 45px;
+  align-items: center;
+  justify-content: center;
+  margin: 0 0 9px;
+  border: 1px solid rgba(142, 225, 244, 0.57);
+  border-radius: 50%;
+  background: rgba(120, 207, 237, 0.15);
+  box-shadow: 0 0 0 6px rgba(120, 207, 237, 0.07);
+  color: var(--gd-cyan);
+  animation: cafe-dictation-breathe 2.8s ease-in-out infinite;
+}
+
+.cafe-global-dictation__recording h1 {
+  margin: 0;
+  color: var(--gd-white);
+  font-size: 21px;
+  font-weight: 675;
+  letter-spacing: -0.035em;
+  line-height: 1.15;
+}
+
+.cafe-global-dictation__recording-center .cafe-global-dictation__subtle {
+  margin-top: 5px;
+}
+
+.cafe-global-dictation__live-transcript {
+  display: -webkit-box;
+  width: min(100%, 380px);
+  min-height: 23px;
+  max-height: 47px;
+  overflow: hidden;
+  margin: 14px 0 0;
+  color: #dae6f0;
+  font-size: 13px;
+  line-height: 1.75;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.cafe-global-dictation__recording-footer,
+.cafe-global-dictation__review-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-top: 1px solid rgba(230, 241, 251, 0.12);
+  padding-top: 12px;
+}
+
+.cafe-global-dictation__recording-footer > span {
+  color: #a8b8c8;
+  font-size: 11px;
+}
+
+.cafe-global-dictation__recording button,
+.cafe-global-dictation__review button {
+  font-family: inherit;
+}
+
+.cafe-global-dictation__primary-button {
+  display: inline-flex;
+  min-height: 35px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid rgba(217, 250, 255, 0.9);
+  border-radius: 13px;
+  padding: 0 15px;
+  background: linear-gradient(160deg, #e8fcff, #aee8f2);
+  box-shadow: 0 4px 15px rgba(80, 209, 235, 0.17);
+  color: #142831;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 750;
+  transition:
+    filter 140ms ease,
+    transform 140ms ease;
+}
+
+.cafe-global-dictation__primary-button:not(:disabled):hover {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
+.cafe-global-dictation__review {
+  display: grid;
+  height: 100%;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  padding: 10px 14px 12px;
+}
+
+.cafe-global-dictation__review .cafe-global-dictation__chrome {
+  min-height: 31px;
+  margin-bottom: 8px;
+}
+
+/* Only the middle pane scrolls. The native panel can be constrained by the
+   display work area, and notices/comparison text must not displace its footer. */
+.cafe-global-dictation__review-body {
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 2px 3px 0;
+  scrollbar-color: rgba(181, 214, 225, 0.32) transparent;
+}
+
+.cafe-global-dictation__review-body > * {
+  flex-shrink: 0;
+}
+
+.cafe-global-dictation__draft-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.cafe-global-dictation__field-label,
+.cafe-global-dictation__style-heading > span:first-child,
+.cafe-global-dictation__command-row > div > span {
+  color: #e6f0f8;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.cafe-global-dictation__draft {
+  display: block;
+  width: 100%;
+  min-height: 128px;
+  max-height: 220px;
+  flex: 1 0 128px;
+  resize: vertical;
+  border: 1px solid rgba(229, 242, 255, 0.2);
+  border-radius: 16px;
+  padding: 13px 14px;
+  background: rgba(7, 15, 23, 0.4);
+  box-shadow: inset 0 1px 5px rgba(0, 0, 0, 0.1);
+  color: #f5fbff;
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.cafe-global-dictation__draft::placeholder {
+  color: #8191a1;
+}
+
+.cafe-global-dictation__draft-meta,
+.cafe-global-dictation__style-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.cafe-global-dictation__draft-meta {
+  margin: 6px 1px;
+  color: #91a5b7;
+  font-size: 10px;
+}
+
+.cafe-global-dictation__draft-meta button,
+.cafe-global-dictation__quiet-button {
+  border: 0;
+  background: transparent;
+  color: #b8e5f0;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.cafe-global-dictation__draft-meta button:hover,
+.cafe-global-dictation__quiet-button:hover {
+  color: #edfcff;
+  text-decoration: underline;
+}
+
+.cafe-global-dictation__original-comparison {
+  margin: 0 0 10px;
+  color: #a8bdcb;
+  font-size: 10px;
+}
+
+.cafe-global-dictation__original-comparison summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.cafe-global-dictation__original-comparison p {
+  max-height: 70px;
+  overflow: auto;
+  margin: 7px 0 0;
+  border-left: 2px solid rgba(142, 225, 244, 0.3);
+  padding: 3px 0 3px 9px;
+  color: #c8d7e2;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.cafe-global-dictation__style-heading > span:last-child,
+.cafe-global-dictation__draft-heading > span {
+  color: #8da1b2;
+  font-size: 10px;
+}
+
+.cafe-global-dictation__styles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 7px 0 10px;
+}
+
+.cafe-global-dictation__style-chip,
+.cafe-global-dictation__command-button,
+.cafe-global-dictation__review-actions > button:not(.cafe-global-dictation__primary-button) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid rgba(229, 242, 255, 0.18);
+  border-radius: 11px;
+  background: rgba(229, 242, 255, 0.08);
+  color: #e8f2f9;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 620;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease;
+}
+
+.cafe-global-dictation__style-chip {
+  min-height: 29px;
+  padding: 0 10px;
+}
+
+.cafe-global-dictation__style-chip:hover,
+.cafe-global-dictation__command-button:hover,
+.cafe-global-dictation__review-actions > button:not(.cafe-global-dictation__primary-button):hover {
+  border-color: rgba(168, 230, 246, 0.45);
+  background: rgba(154, 225, 243, 0.16);
+}
+
+.cafe-global-dictation__style-chip[aria-pressed="true"] {
+  border-color: rgba(145, 232, 247, 0.7);
+  background: rgba(127, 218, 240, 0.22);
+  color: #e8fbff;
+}
+
+.cafe-global-dictation__custom-style {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.cafe-global-dictation__custom-instructions {
+  width: 100%;
+  min-height: 65px;
+  max-height: 140px;
+  resize: vertical;
+  border: 1px solid rgba(229, 242, 255, 0.2);
+  border-radius: 11px;
+  padding: 8px 10px;
+  background: rgba(7, 15, 23, 0.4);
+  color: var(--gd-white);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.cafe-global-dictation__custom-style > p,
+.cafe-global-dictation__custom-actions > span {
+  margin: 0;
+  color: var(--gd-muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.cafe-global-dictation__custom-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.cafe-global-dictation__notice {
+  margin-bottom: 13px;
+  border: 1px solid rgba(233, 205, 138, 0.34);
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: rgba(137, 96, 30, 0.18);
+  color: #f9e9bd;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.cafe-global-dictation__notice p {
+  margin: 0;
+}
+
+.cafe-global-dictation__notice-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.cafe-global-dictation__notice-actions button {
+  border: 1px solid rgba(249, 233, 189, 0.32);
+  border-radius: 8px;
+  padding: 5px 9px;
+  background: rgba(249, 233, 189, 0.09);
+  color: #fff4d5;
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.cafe-global-dictation__command-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid rgba(230, 241, 251, 0.1);
+  padding: 9px 0 10px;
+}
+
+.cafe-global-dictation__command-row > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cafe-global-dictation__command-row small {
+  color: #9aabba;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.cafe-global-dictation__command-button {
+  min-height: 31px;
+  flex: none;
+  padding: 0 10px;
+}
+
+.cafe-global-dictation__command-button[aria-pressed="true"] {
+  border-color: rgba(255, 177, 191, 0.67);
+  background: rgba(242, 98, 123, 0.17);
+  color: #ffe4e8;
+}
+
+.cafe-global-dictation__feedback {
+  margin: 0 0 9px;
+  color: #c9eaf2;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.cafe-global-dictation__review-footer {
+  flex-wrap: wrap;
+  padding-top: 10px;
+}
+
+.cafe-global-dictation__paste-notice {
+  width: 100%;
+  margin: 0;
+  color: #a8bdcb;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.cafe-global-dictation__review-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.cafe-global-dictation__review-actions > button {
+  white-space: nowrap;
+}
+
+.cafe-global-dictation__review-actions > button:not(.cafe-global-dictation__primary-button) {
+  min-height: 35px;
+  padding: 0 11px;
+}
+
+@keyframes cafe-dictation-breathe {
+  50% {
+    box-shadow: 0 0 0 9px rgba(120, 207, 237, 0.035);
+  }
+}
+
+@media (max-width: 380px) {
+  .cafe-global-dictation__review-footer {
+    flex-wrap: wrap;
+  }
+  .cafe-global-dictation__review-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .cafe-global-dictation__review-actions > button {
+    flex: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cafe-global-dictation__recording-orb {
+    animation: none;
+  }
+  .cafe-global-dictation button {
+    transition: none;
+  }
+  .cafe-global-dictation__primary-button:not(:disabled):hover {
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .cafe-global-dictation__glass {
+    background: #1c2731;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}
+
+.cafe-global-dictation[data-reduced-transparency="true"] .cafe-global-dictation__glass {
+  background: #1c2731;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}

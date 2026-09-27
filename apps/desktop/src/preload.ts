@@ -41,6 +41,28 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     ipcRenderer.invoke(IpcChannels.SET_SERVER_EXPOSURE_MODE_CHANNEL, mode),
   setServerHttpsEnabled: (enabled) =>
     ipcRenderer.invoke(IpcChannels.SET_SERVER_HTTPS_ENABLED_CHANNEL, enabled),
+  getGlobalDictationSettings: () =>
+    ipcRenderer.invoke(IpcChannels.GET_GLOBAL_DICTATION_SETTINGS_CHANNEL),
+  setGlobalDictationEnabled: (enabled) =>
+    ipcRenderer.invoke(IpcChannels.SET_GLOBAL_DICTATION_ENABLED_CHANNEL, enabled),
+  setGlobalDictationShortcut: (shortcut) =>
+    ipcRenderer.invoke(IpcChannels.SET_GLOBAL_DICTATION_SHORTCUT_CHANNEL, shortcut),
+  onGlobalDictationEvent: (listener) => {
+    const wrappedListener = (_event: Electron.IpcRendererEvent, payload: unknown) => {
+      if (typeof payload !== "object" || payload === null) return;
+      listener(payload as Parameters<typeof listener>[0]);
+    };
+
+    ipcRenderer.on(IpcChannels.GLOBAL_DICTATION_EVENT_CHANNEL, wrappedListener);
+    return () =>
+      ipcRenderer.removeListener(IpcChannels.GLOBAL_DICTATION_EVENT_CHANNEL, wrappedListener);
+  },
+  globalDictationAction: (input) =>
+    ipcRenderer.invoke(IpcChannels.GLOBAL_DICTATION_ACTION_CHANNEL, input),
+  claimComposerDictationCapture: () =>
+    ipcRenderer.invoke(IpcChannels.CLAIM_COMPOSER_DICTATION_CAPTURE_CHANNEL),
+  releaseComposerDictationCapture: (leaseId) =>
+    ipcRenderer.invoke(IpcChannels.RELEASE_COMPOSER_DICTATION_CAPTURE_CHANNEL, leaseId),
   getAdvertisedEndpoints: () => ipcRenderer.invoke(IpcChannels.GET_ADVERTISED_ENDPOINTS_CHANNEL),
   pickFolder: (options) => ipcRenderer.invoke(IpcChannels.PICK_FOLDER_CHANNEL, options),
   confirm: (message) => ipcRenderer.invoke(IpcChannels.CONFIRM_CHANNEL, message),

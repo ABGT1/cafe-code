@@ -47,6 +47,19 @@ const DICTATION_MAX_AUDIO_TRACK_COUNT = 32;
 const DICTATION_MAX_AUDIO_SAMPLE_RATE = 768_000;
 const DICTATION_MAX_AUDIO_CHANNEL_COUNT = 32;
 const DICTATION_MAX_AUDIO_SAMPLE_SIZE = 64;
+const GLOBAL_DICTATION_TARGET_OUTCOMES = [
+  "not_attempted",
+  "succeeded",
+  "accessibility_permission_required",
+  "clipboard_unavailable",
+  "helper_unavailable",
+  "helper_protocol_error",
+  "invalid_text",
+  "insertion_uncertain",
+  "target_changed",
+  "target_unavailable",
+  "target_unsupported",
+] as const;
 const DICTATION_STAGES = new Set([
   "client_secret",
   "microphone",
@@ -212,6 +225,62 @@ interface DesktopProcessDiagnostic {
   readonly stack: string | null;
 }
 
+/**
+ * Main-process shortcut diagnostics deliberately have no free-form messages.
+ * In particular, neither the native Accessibility target nor the dictation
+ * draft may cross into the debug endpoint, including its full-detail view.
+ */
+export type GlobalDictationTargetDebugOutcome = (typeof GLOBAL_DICTATION_TARGET_OUTCOMES)[number];
+
+export interface GlobalDictationShortcutDebugSnapshot {
+  readonly enabled: boolean;
+  readonly shortcut: string;
+  readonly registered: boolean;
+  readonly electronRegistered: boolean | null;
+  readonly registrationOutcome:
+    | "not_attempted"
+    | "registered"
+    | "rejected"
+    | "settings_write_failed"
+    | "disabled"
+    | "unsupported";
+  readonly registrationCheckedAt: string | null;
+  readonly invocationCount: number;
+  readonly lastInvokedAt: string | null;
+  readonly lastToggleOutcome:
+    | "not_invoked"
+    | "opening"
+    | "panel_created"
+    | "opened"
+    | "open_failed"
+    | "stopped"
+    | "review_shown"
+    | "already_starting"
+    | "composer_busy"
+    | "superseded"
+    | "helper_unavailable"
+    | "ignored";
+  readonly lastToggleAt: string | null;
+  readonly panelPhase: "recording" | "finalizing" | "review" | null;
+  readonly panelReady: boolean;
+  readonly panelVisible: boolean;
+  readonly panelLoadOutcome:
+    | "not_started"
+    | "loading"
+    | "loaded"
+    | "preload_failed"
+    | "navigation_failed"
+    | "renderer_crashed";
+  readonly lastPanelReadyOutcome: "not_seen" | "accepted" | "reload_rejected" | "timeout";
+  readonly lastPanelReadyAt: string | null;
+  readonly lastCaptureOutcome: GlobalDictationTargetDebugOutcome;
+  readonly lastCaptureAt: string | null;
+  readonly lastCaptureDurationMs: number | null;
+  readonly lastInsertOutcome: GlobalDictationTargetDebugOutcome;
+  readonly lastInsertAt: string | null;
+  readonly lastInsertDurationMs: number | null;
+}
+
 interface DebugServerRuntimeState {
   readonly enabled: boolean;
   readonly launchedAt: string;
@@ -223,6 +292,7 @@ interface DebugServerRuntimeState {
   lastDebugRequestDurationMs: number | null;
   lastDebugResponseBytes: number | null;
   rendererSnapshot: DesktopRendererDebugSnapshot | null;
+  globalDictationShortcut: GlobalDictationShortcutDebugSnapshot | null;
   providerDaemonSnapshot: Record<string, unknown> | null;
   providerDaemonSnapshotRefresher: (() => Promise<void>) | null;
   providerDaemonSnapshotRefresh: {
@@ -277,6 +347,7 @@ const state: DebugServerRuntimeState = {
   lastDebugRequestDurationMs: null,
   lastDebugResponseBytes: null,
   rendererSnapshot: null,
+  globalDictationShortcut: null,
   providerDaemonSnapshot: null,
   providerDaemonSnapshotRefresher: null,
   providerDaemonSnapshotRefresh: {
@@ -467,6 +538,15 @@ function readCanonicalIsoTimestamp(value: unknown): string | null {
   }
   const timestampMs = Date.parse(value);
   return Number.isFinite(timestampMs) ? new Date(timestampMs).toISOString() : null;
+}
+
+function readGlobalDictationTargetOutcome(value: unknown): GlobalDictationTargetDebugOutcome {
+  // Native errors and captured target data must never become diagnostic
+  // strings, even when a future caller bypasses the compile-time union.
+  return typeof value === "string" &&
+    GLOBAL_DICTATION_TARGET_OUTCOMES.includes(value as GlobalDictationTargetDebugOutcome)
+    ? (value as GlobalDictationTargetDebugOutcome)
+    : "helper_protocol_error";
 }
 
 function readDictationRequestId(value: unknown): string | null {
@@ -1581,6 +1661,7 @@ function buildCompactDebugSnapshot(): Record<string, unknown> {
     },
     process: summarizeProcessForCompactDebug(),
     providerDaemon: summarizeProviderDaemonForCompactDebug(),
+    globalDictationShortcut: state.globalDictationShortcut,
     renderer: summarizeRendererForCompactDebug(),
     freshness: buildProviderRendererFreshnessDiagnostic(),
   };
@@ -1675,6 +1756,7 @@ function buildFullDebugSnapshot(): Record<string, unknown> {
             available: true,
             snapshot: state.providerDaemonSnapshot,
           },
+    globalDictationShortcut: state.globalDictationShortcut,
     renderer:
       state.rendererSnapshot === null
         ? {
@@ -1769,6 +1851,51 @@ export const publishRendererDebugSnapshot = (
     ];
   });
 
+/** Publish only the fixed, content-free shortcut lifecycle from Electron main. */
+export const publishGlobalDictationShortcutDebugSnapshot = (
+  snapshot: GlobalDictationShortcutDebugSnapshot,
+): void => {
+  if (!state.enabled) return;
+  // Construct a fresh object with known fields; do not accidentally forward
+  // a future caller's native error, transcript, target, or credential fields.
+  state.globalDictationShortcut = {
+    enabled: snapshot.enabled,
+    shortcut: /^(?:CommandOrControl|CmdOrCtrl|Command|Cmd)\+Shift\+[A-Z0-9,./;\-=]$/u.test(
+      snapshot.shortcut,
+    )
+      ? snapshot.shortcut
+      : "invalid",
+    registered: snapshot.registered,
+    electronRegistered: snapshot.electronRegistered,
+    registrationOutcome: snapshot.registrationOutcome,
+    registrationCheckedAt: snapshot.registrationCheckedAt,
+    invocationCount: snapshot.invocationCount,
+    lastInvokedAt: snapshot.lastInvokedAt,
+    lastToggleOutcome: snapshot.lastToggleOutcome,
+    lastToggleAt: snapshot.lastToggleAt,
+    panelPhase: snapshot.panelPhase,
+    panelReady: snapshot.panelReady,
+    panelVisible: snapshot.panelVisible,
+    panelLoadOutcome: snapshot.panelLoadOutcome,
+    lastPanelReadyOutcome: snapshot.lastPanelReadyOutcome,
+    lastPanelReadyAt: snapshot.lastPanelReadyAt,
+    lastCaptureOutcome: readGlobalDictationTargetOutcome(snapshot.lastCaptureOutcome),
+    lastCaptureAt: readCanonicalIsoTimestamp(snapshot.lastCaptureAt),
+    lastCaptureDurationMs: readBoundedNumber(
+      snapshot.lastCaptureDurationMs,
+      0,
+      DICTATION_MAX_DURATION_MS,
+    ),
+    lastInsertOutcome: readGlobalDictationTargetOutcome(snapshot.lastInsertOutcome),
+    lastInsertAt: readCanonicalIsoTimestamp(snapshot.lastInsertAt),
+    lastInsertDurationMs: readBoundedNumber(
+      snapshot.lastInsertDurationMs,
+      0,
+      DICTATION_MAX_DURATION_MS,
+    ),
+  };
+};
+
 export const publishProviderDaemonDebugSnapshot = (
   snapshot: Record<string, unknown>,
 ): Effect.Effect<void> =>
@@ -1804,6 +1931,7 @@ export const __desktopDebugServerTestApi = {
     state.lastDebugRequestDurationMs = null;
     state.lastDebugResponseBytes = null;
     state.rendererSnapshot = null;
+    state.globalDictationShortcut = null;
     state.providerDaemonSnapshot = null;
     state.providerDaemonSnapshotRefresher = null;
     state.providerDaemonSnapshotRefresh = {
@@ -1837,6 +1965,9 @@ export const __desktopDebugServerTestApi = {
       ...state.rendererSnapshotHistory.slice(1 - RENDERER_SNAPSHOT_HISTORY_LIMIT),
       buildRendererSnapshotHistoryEntry(snapshot, receivedAt),
     ];
+  },
+  publishGlobalDictationShortcutSnapshot(snapshot: GlobalDictationShortcutDebugSnapshot): void {
+    publishGlobalDictationShortcutDebugSnapshot(snapshot);
   },
   publishProviderDaemonSnapshot(snapshot: Record<string, unknown>): void {
     state.providerDaemonSnapshot = {

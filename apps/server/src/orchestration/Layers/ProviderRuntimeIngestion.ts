@@ -7,9 +7,11 @@ import {
   CommandId,
   EventId,
   MessageId,
+  type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationMessage,
   type OrchestrationProposedPlanId,
+  type OrchestrationSession,
   CheckpointRef,
   isToolLifecycleItemType,
   ThreadId,
@@ -82,6 +84,7 @@ import {
 } from "../codexSteerIntentLedger.ts";
 import { sanitizeProviderToolData } from "@cafecode/shared/activityPayloadSanitizer";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { isSupersededSessionLifecycle, sessionLifecycleSnapshot } from "../sessionLifecycle.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 const providerRuntimeEventKey = (event: ProviderRuntimeEvent) =>
@@ -1117,6 +1120,24 @@ interface EnrichedCodexSteerProcessingActivities {
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const orchestrationEngine = yield* OrchestrationEngineService;
+  const dispatchObservedSession = (
+    command: Extract<OrchestrationCommand, { readonly type: "thread.session.set" }>,
+    observedSession: OrchestrationSession | null,
+  ) =>
+    orchestrationEngine
+      .dispatch({
+        ...command,
+        expectedSessionLifecycle: sessionLifecycleSnapshot(observedSession),
+      })
+      .pipe(
+        // An old observation losing its compare-and-set is expected, including
+        // replay of that rejected command. Continue projecting its scoped
+        // content and terminal receipt; never retry a provider operation or
+        // discard the remainder of the event just because newer work won.
+        Effect.catch((error) =>
+          isSupersededSessionLifecycle(error) ? Effect.succeed(undefined) : Effect.fail(error),
+        ),
+      );
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const usageStats = yield* UsageStatsService;
@@ -2365,34 +2386,34 @@ const make = Effect.gen(function* () {
                 ? ("ready" as const)
                 : null;
           if (nextStatus !== null) {
-            yield* orchestrationEngine.dispatch({
-              type: "thread.session.set",
-              commandId: providerCommandId(event, "thread-goal-session-state"),
-              threadId: thread.id,
-              session: {
-                ...currentSession,
-                status: nextStatus,
-                activeTurnId: null,
-                lastError: null,
-                // Session clocks are monotonic even when an older daemon event
-                // resumes midway through its fanout after a restart.
-                updatedAt: currentSession.updatedAt > now ? currentSession.updatedAt : now,
+            yield* dispatchObservedSession(
+              {
+                type: "thread.session.set",
+                commandId: providerCommandId(event, "thread-goal-session-state"),
+                threadId: thread.id,
+                session: {
+                  ...currentSession,
+                  status: nextStatus,
+                  activeTurnId: null,
+                  lastError: null,
+                  // Session clocks are monotonic even when an older daemon event
+                  // resumes midway through its fanout after a restart.
+                  updatedAt: currentSession.updatedAt > now ? currentSession.updatedAt : now,
+                },
+                createdAt: now,
               },
-              createdAt: now,
-            });
+              currentSession,
+            );
           }
         }
       }
 
       const completedTurnState =
         event.type === "turn.completed" ? normalizeRuntimeTurnState(event.payload.state) : null;
-      if (
+      const interruptsGoalContinuation =
         event.type === "turn.aborted" ||
         completedTurnState === "interrupted" ||
-        completedTurnState === "cancelled"
-      ) {
-        interruptedGoalThreadIds.add(thread.id);
-      }
+        completedTurnState === "cancelled";
 
       const activeGoalContinuationExpected =
         activeGoalThreadIds.has(thread.id) && !interruptedGoalThreadIds.has(thread.id);
@@ -2558,6 +2579,20 @@ const make = Effect.gen(function* () {
       const terminalTurnRecovery =
         explicitTerminalTurnRecovery ??
         (restoresFalseOrphanTerminal ? ("live-provider-continuation" as const) : undefined);
+      const observedLifecycleTurn =
+        terminalTurnRecovery === undefined &&
+        eventTurnId !== undefined &&
+        (event.type === "turn.started" || event.type === "turn.completed")
+          ? yield* projectionTurnRepository.getByTurnId({
+              threadId: thread.id,
+              turnId: eventTurnId,
+            })
+          : Option.none();
+      const observesAlreadyTerminalTurn =
+        Option.isSome(observedLifecycleTurn) &&
+        (observedLifecycleTurn.value.state === "completed" ||
+          observedLifecycleTurn.value.state === "interrupted" ||
+          observedLifecycleTurn.value.state === "error");
 
       // Only the runtime owner's positively reconciled loss can authorize
       // automatic continuation. A delayed loss from an older turn must never
@@ -2630,6 +2665,15 @@ const make = Effect.gen(function* () {
       const shouldApplyThreadLifecycle =
         !shouldSuppressFailedSessionHeartbeat &&
         passesStrictProviderLifecycleGuard &&
+        // Resume backfills include turn.started for historical terminal turns.
+        // They remain useful transcript history, but must not consume a newer
+        // pending start or let the SQL terminal guard settle its session. Only
+        // explicit, independently verified recovery may reopen that exact turn.
+        !(
+          observesAlreadyTerminalTurn &&
+          (event.type === "turn.started" ||
+            (event.type === "turn.completed" && activeTurnId === null))
+        ) &&
         // Reject the marker's lifecycle mutation entirely, not only its
         // terminal override: an unmatched marker must not introduce an unknown
         // turn or release the goal cancellation barrier below. Independently
@@ -2637,12 +2681,6 @@ const make = Effect.gen(function* () {
         (!isCodexAggregateReopenEvent ||
           explicitTerminalTurnRecovery !== undefined ||
           restoresFalseOrphanTerminal);
-      if (event.type === "turn.started" && shouldApplyThreadLifecycle) {
-        // Only an accepted concrete provider turn may release a cancellation
-        // barrier. Replayed or conflicting turn.started events are content
-        // history, not fresh user intent.
-        interruptedGoalThreadIds.delete(thread.id);
-      }
       const acceptedTurnStartedSourcePlan =
         event.type === "turn.started" && shouldApplyThreadLifecycle
           ? yield* getSourceProposedPlanReferenceForAcceptedTurnStart(thread.id, eventTurnId)
@@ -2697,6 +2735,7 @@ const make = Effect.gen(function* () {
         });
       }
 
+      let appliedSessionLifecycle = false;
       if (
         event.type === "session.started" ||
         event.type === "session.state.changed" ||
@@ -2739,6 +2778,9 @@ const make = Effect.gen(function* () {
           switch (event.type) {
             case "session.state.changed": {
               const runtimeStatus = orchestrationSessionStatusFromRuntimeState(event.payload.state);
+              // Session readiness is initialization metadata, not completion
+              // of a provider-owned turn already established by turn.started.
+              if (runtimeStatus === "ready" && activeTurnId !== null) return "running";
               return runtimeStatus === "ready" && hasPendingTurnStart ? "starting" : runtimeStatus;
             }
             case "thread.state.changed":
@@ -2842,7 +2884,7 @@ const make = Effect.gen(function* () {
             );
           }
 
-          yield* orchestrationEngine.dispatch({
+          const sessionCommand = {
             type: "thread.session.set",
             commandId: providerCommandId(event, "thread-session-set"),
             threadId: thread.id,
@@ -2860,9 +2902,26 @@ const make = Effect.gen(function* () {
             },
             ...(terminalTurnRecovery ? { terminalTurnRecovery } : {}),
             createdAt: now,
-          });
+          } satisfies Extract<OrchestrationCommand, { readonly type: "thread.session.set" }>;
+          if (event.type === "turn.started" || shouldRefreshSessionForActiveTurnWork) {
+            // Positive native liveness retains the existing exact provider
+            // ownership repair path. A concurrent provisional ACK must not
+            // suppress the later concrete turn.started identity.
+            yield* orchestrationEngine.dispatch(sessionCommand);
+            appliedSessionLifecycle = true;
+          } else {
+            appliedSessionLifecycle =
+              (yield* dispatchObservedSession(sessionCommand, thread.session)) !== undefined;
+          }
+          if (appliedSessionLifecycle) {
+            // Goal barriers and recovery markers belong to the same accepted
+            // lifecycle transition. A rejected old completion must not alter
+            // a newer turn's continuation policy after its session CAS fails.
+            if (interruptsGoalContinuation) interruptedGoalThreadIds.add(thread.id);
+            if (event.type === "turn.started") interruptedGoalThreadIds.delete(thread.id);
+          }
 
-          if (mayRecoverRuntimeOwnershipLoss) {
+          if (mayRecoverRuntimeOwnershipLoss && appliedSessionLifecycle) {
             // This durable, content-free marker is the only automatic recovery
             // authority. The reactor verifies its exact event sequence and
             // later Stop/newer-input barriers before resuming anything. It is
@@ -3141,9 +3200,10 @@ const make = Effect.gen(function* () {
       }
 
       if (
-        event.type === "turn.aborted" ||
-        (event.type === "session.exited" &&
-          (!isRuntimeOwnershipLoss || mayRecoverRuntimeOwnershipLoss))
+        appliedSessionLifecycle &&
+        (event.type === "turn.aborted" ||
+          (event.type === "session.exited" &&
+            (!isRuntimeOwnershipLoss || mayRecoverRuntimeOwnershipLoss)))
       ) {
         yield* clearTurnStateForSession(thread.id);
       }
@@ -3156,24 +3216,27 @@ const make = Effect.gen(function* () {
           : activeTurnId === null || eventTurnId === undefined || sameId(activeTurnId, eventTurnId);
 
         if (shouldApplyRuntimeError) {
-          yield* orchestrationEngine.dispatch({
-            type: "thread.session.set",
-            commandId: providerCommandId(event, "runtime-error-session-set"),
-            threadId: thread.id,
-            session: {
+          yield* dispatchObservedSession(
+            {
+              type: "thread.session.set",
+              commandId: providerCommandId(event, "runtime-error-session-set"),
               threadId: thread.id,
-              status: "error",
-              providerName: event.provider,
-              ...(event.providerInstanceId !== undefined
-                ? { providerInstanceId: event.providerInstanceId }
-                : {}),
-              runtimeMode: thread.session?.runtimeMode ?? "full-access",
-              activeTurnId: eventTurnId ?? null,
-              lastError: runtimeErrorMessage,
-              updatedAt: now,
+              session: {
+                threadId: thread.id,
+                status: "error",
+                providerName: event.provider,
+                ...(event.providerInstanceId !== undefined
+                  ? { providerInstanceId: event.providerInstanceId }
+                  : {}),
+                runtimeMode: thread.session?.runtimeMode ?? "full-access",
+                activeTurnId: eventTurnId ?? null,
+                lastError: runtimeErrorMessage,
+                updatedAt: now,
+              },
+              createdAt: now,
             },
-            createdAt: now,
-          });
+            thread.session,
+          );
         }
       }
 

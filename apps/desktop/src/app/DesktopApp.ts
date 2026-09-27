@@ -13,6 +13,7 @@ import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import { installDesktopIpcHandlers } from "../ipc/DesktopIpcHandlers.ts";
+import { installGlobalDictationCoordinator } from "../dictation/GlobalDictationCoordinator.ts";
 import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
 import * as DesktopApplicationMenu from "../window/DesktopApplicationMenu.ts";
 import * as DesktopBackendManager from "../backend/DesktopBackendManager.ts";
@@ -476,6 +477,10 @@ const bootstrap = Effect.gen(function* () {
     ),
     quitting: state.quitting,
   });
+  // Register the optional Mac hotkey only after Electron and the local
+  // backend are ready. The coordinator's scoped finalizer unregisters it on
+  // Quit; closing the ordinary main window does not end dictation on macOS.
+  yield* installGlobalDictationCoordinator;
   yield* runProviderDaemonHealthWatchdog({
     backendManager,
     providerDaemonManager,

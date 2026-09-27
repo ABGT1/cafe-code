@@ -48,6 +48,44 @@ export const DictationCreateClientSecretInput = Schema.Struct({
 export type DictationCreateClientSecretInput = typeof DictationCreateClientSecretInput.Type;
 
 /**
+ * AI style rewriting is a separate, paid text API request, not a Realtime
+ * transcription setting. A literal consent value makes that privacy/cost
+ * transition explicit for every call (including modified clients). The
+ * service additionally enforces UTF-8 byte limits before contacting OpenAI.
+ */
+export const DICTATION_REWRITE_INPUT_MAX_CHARS = 8_192;
+export const DICTATION_REWRITE_OUTPUT_MAX_CHARS = 16_384;
+export const DICTATION_REWRITE_INSTRUCTIONS_MAX_CHARS = 2_000;
+const rewriteTextFields = {
+  text: Schema.String.check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(DICTATION_REWRITE_INPUT_MAX_CHARS),
+  ),
+  consent: Schema.Literal(true),
+};
+export const DictationRewriteTextInput = Schema.Union([
+  Schema.Struct({ ...rewriteTextFields, style: Schema.Literal("formal") }),
+  Schema.Struct({
+    ...rewriteTextFields,
+    style: Schema.Literal("custom"),
+    // Instructions describe writing style only. They remain user-level data
+    // beneath fixed server instructions and cannot configure tools or models.
+    instructions: TrimmedNonEmptyString.check(
+      Schema.isMaxLength(DICTATION_REWRITE_INSTRUCTIONS_MAX_CHARS),
+    ),
+  }),
+]);
+export type DictationRewriteTextInput = typeof DictationRewriteTextInput.Type;
+
+export const DictationRewriteTextResult = Schema.Struct({
+  text: Schema.String.check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(DICTATION_REWRITE_OUTPUT_MAX_CHARS),
+  ),
+});
+export type DictationRewriteTextResult = typeof DictationRewriteTextResult.Type;
+
+/**
  * Upstream error identifiers are provider-controlled strings. Diagnostics may
  * preserve only this small semantic vocabulary; every other reported value is
  * collapsed to `other` by each consumer before it reaches a debug surface.
@@ -126,6 +164,7 @@ export type DictationRealtimeClientSecret = typeof DictationRealtimeClientSecret
 export const DictationErrorCode = Schema.Literals([
   "not_configured",
   "not_authorized",
+  "invalid_input",
   "insecure_transport",
   "rate_limited",
   "secret_store_failed",

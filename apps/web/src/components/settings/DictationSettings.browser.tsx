@@ -1,6 +1,7 @@
 import "../../index.css";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { DesktopBridge, GlobalDictationSettingsState } from "@cafecode/contracts";
 import { page } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
@@ -80,6 +81,8 @@ function getAlertDialogButton(name: string): HTMLButtonElement {
 }
 
 describe("DictationSettings", () => {
+  const originalDesktopBridge = window.desktopBridge;
+  const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(navigator, "platform");
   let mounted:
     | (Awaited<ReturnType<typeof render>> & {
         cleanup?: () => Promise<void>;
@@ -105,6 +108,13 @@ describe("DictationSettings", () => {
     queryClient?.clear();
     queryClient = null;
     document.body.innerHTML = "";
+    if (originalDesktopBridge) window.desktopBridge = originalDesktopBridge;
+    else Reflect.deleteProperty(window, "desktopBridge");
+    if (originalPlatformDescriptor) {
+      Object.defineProperty(navigator, "platform", originalPlatformDescriptor);
+    } else {
+      Reflect.deleteProperty(navigator, "platform");
+    }
   });
 
   async function renderSettings() {
@@ -224,5 +234,56 @@ describe("DictationSettings", () => {
     await expect.element(page.getByLabelText("New OpenAI API key")).toHaveValue("");
     expect(document.body.textContent).not.toContain(apiKey);
     expect(document.body.textContent).not.toContain("unsafe provider detail");
+  });
+
+  it("keeps Mac global capture opt-in and saves a recorded Command–Shift shortcut", async () => {
+    dictationHarness.reset({ configured: true, canManage: true });
+    Object.defineProperty(navigator, "platform", { configurable: true, value: "MacIntel" });
+    let settings: GlobalDictationSettingsState = {
+      enabled: false,
+      shortcut: "CommandOrControl+Shift+,",
+      registered: false,
+      error: null,
+    };
+    const setEnabled = vi.fn(async (enabled: boolean) => {
+      settings = { ...settings, enabled, registered: enabled };
+      return settings;
+    });
+    const setShortcut = vi.fn(async (shortcut: string) => {
+      settings = { ...settings, shortcut };
+      return settings;
+    });
+    window.desktopBridge = {
+      getGlobalDictationSettings: async () => settings,
+      setGlobalDictationEnabled: setEnabled,
+      setGlobalDictationShortcut: setShortcut,
+    } as unknown as DesktopBridge;
+
+    await renderSettings();
+    await expect
+      .element(page.getByRole("heading", { name: "Dictate anywhere on Mac" }))
+      .toBeVisible();
+    await expect
+      .element(page.getByRole("switch", { name: "Enable Mac global dictation" }))
+      .not.toBeChecked();
+    await page.getByRole("switch", { name: "Enable Mac global dictation" }).click();
+    await vi.waitFor(() => expect(setEnabled).toHaveBeenCalledWith(true));
+    await expect
+      .element(page.getByText("Ready. Press the shortcut to start, then press it again to stop."))
+      .toBeVisible();
+
+    await page.getByRole("button", { name: "Change", exact: true }).click();
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        code: "KeyD",
+        key: "D",
+        metaKey: true,
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await vi.waitFor(() => expect(setShortcut).toHaveBeenCalledWith("CommandOrControl+Shift+D"));
+    await expect.element(page.getByText("⌘ ⇧ D")).toBeVisible();
   });
 });

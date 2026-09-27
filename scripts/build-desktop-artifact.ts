@@ -841,6 +841,15 @@ export function resolveMacDesktopBuildConfig(
   signed: boolean,
 ): Record<string, unknown> {
   return {
+    // The AX helper cannot run from app.asar. Keep its location stable for the
+    // desktop-main resolver and let electron-builder include it in the signed
+    // .app Resources tree rather than loading an executable from user data.
+    extraResources: [
+      {
+        from: "apps/desktop/resources/mac-dictation-target",
+        to: "mac-dictation-target",
+      },
+    ],
     mac: {
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
@@ -1088,8 +1097,41 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     options.verbose,
   );
 
-  // electron-builder is filtering out stageResourcesDir directory in the AppImage for production
+  // electron-builder's desktop resource copy has historically been used as
+  // an app.asar fallback. Copy ordinary resources before staging the binary:
+  // the privileged helper must live only at its explicit extraResources path.
   yield* fs.copy(stageResourcesDir, path.join(stageAppDir, "apps/desktop/prod-resources"));
+
+  if (options.platform === "mac") {
+    if (process.platform !== "darwin") {
+      return yield* new BuildScriptError({
+        message:
+          "A macOS host with Apple command line tools is required to build the dictation helper.",
+      });
+    }
+    // The main source build produces a host-architecture helper for local
+    // runs. Artifact builds may target the other architecture or universal, so
+    // compile into this private stage for the selected release architecture.
+    yield* runCommand(
+      ChildProcess.make(
+        process.execPath,
+        [
+          path.join(repoRoot, "apps/desktop/scripts/build-mac-dictation-helper.mjs"),
+          "--arch",
+          options.arch,
+          "--output",
+          path.join(stageResourcesDir, "mac-dictation-target"),
+          "--force",
+        ],
+        {
+          cwd: repoRoot,
+          ...commandOutputOptions(options.verbose),
+          shell: false,
+        },
+      ),
+    );
+  }
+
   yield* stageWindowsManagedRuntime(options, repoRoot, stageResourcesDir);
 
   const yarnCatalog = yield* Effect.try({

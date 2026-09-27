@@ -94,6 +94,17 @@ export function useComposerDictation(
   const ownedRangeRef = useRef<ComposerDictationOwnedRange | null>(null);
   const reportedErrorGenerationRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
+  const desktopCaptureLeaseRef = useRef<string | null>(null);
+
+  const releaseDesktopCapture = useCallback(() => {
+    const leaseId = desktopCaptureLeaseRef.current;
+    if (leaseId === null) return;
+    desktopCaptureLeaseRef.current = null;
+    // A renderer loss also releases the main-owned claim by webContents
+    // identity. This ordinary path is best effort and never blocks transcript
+    // cleanup or displays a raw IPC error.
+    void window.desktopBridge?.releaseComposerDictationCapture?.(leaseId).catch(() => undefined);
+  }, []);
 
   const transition = useCallback((sessionKey: string, phase: ComposerDictationPhase) => {
     phaseRef.current = phase;
@@ -111,7 +122,8 @@ export function useComposerDictation(
     ownedRangeRef.current = null;
     reportedErrorGenerationRef.current = null;
     phaseRef.current = "idle";
-  }, []);
+    releaseDesktopCapture();
+  }, [releaseDesktopCapture]);
 
   const reportErrorOnce = useCallback((generation: number, error: unknown) => {
     if (reportedErrorGenerationRef.current === generation) return;
@@ -147,6 +159,23 @@ export function useComposerDictation(
     transition(sessionKey, "starting");
 
     try {
+      if (window.desktopBridge?.claimComposerDictationCapture) {
+        const leaseId = await window.desktopBridge.claimComposerDictationCapture();
+        if (leaseId === null) {
+          if (generationRef.current === generation) {
+            ownedRangeRef.current = null;
+            pendingStartAbortRef.current = null;
+            transition(sessionKey, "idle");
+            currentInput.onError("Finish the other dictation before starting this one.");
+          }
+          return false;
+        }
+        desktopCaptureLeaseRef.current = leaseId;
+        if (generationRef.current !== generation || abortController.signal.aborted) {
+          releaseDesktopCapture();
+          return false;
+        }
+      }
       const session = await startRealtimeTranscription({
         signal: abortController.signal,
         getClientSecret: currentInput.createClientSecret,
@@ -176,6 +205,7 @@ export function useComposerDictation(
           sessionRef.current = null;
           pendingStartAbortRef.current = null;
           ownedRangeRef.current = null;
+          releaseDesktopCapture();
           transition(sessionKey, "error");
           reportErrorOnce(generation, error);
         },
@@ -183,6 +213,7 @@ export function useComposerDictation(
 
       if (generationRef.current !== generation || abortController.signal.aborted) {
         session.cancel();
+        releaseDesktopCapture();
         return false;
       }
       pendingStartAbortRef.current = null;
@@ -194,6 +225,7 @@ export function useComposerDictation(
       pendingStartAbortRef.current = null;
       sessionRef.current = null;
       ownedRangeRef.current = null;
+      releaseDesktopCapture();
       if (error instanceof RealtimeTranscriptionError && error.code === "cancelled") {
         transition(sessionKey, "idle");
         return false;
@@ -202,7 +234,7 @@ export function useComposerDictation(
       reportErrorOnce(generation, error);
       return false;
     }
-  }, [reportErrorOnce, transition]);
+  }, [releaseDesktopCapture, reportErrorOnce, transition]);
 
   const stop = useCallback((): Promise<boolean> => {
     if (phaseRef.current === "finalizing") {
@@ -223,12 +255,14 @@ export function useComposerDictation(
         if (generationRef.current !== generation) return false;
         sessionRef.current = null;
         ownedRangeRef.current = null;
+        releaseDesktopCapture();
         transition(sessionKey, "idle");
         return true;
       } catch (error) {
         if (generationRef.current !== generation) return false;
         sessionRef.current = null;
         ownedRangeRef.current = null;
+        releaseDesktopCapture();
         transition(sessionKey, "error");
         reportErrorOnce(generation, error);
         return false;
@@ -246,7 +280,7 @@ export function useComposerDictation(
     // rejection.
     void operation.then(clearOperation, clearOperation);
     return operation;
-  }, [reportErrorOnce, transition]);
+  }, [releaseDesktopCapture, reportErrorOnce, transition]);
 
   const finish = useCallback(async (): Promise<boolean> => {
     const generation = generationRef.current;

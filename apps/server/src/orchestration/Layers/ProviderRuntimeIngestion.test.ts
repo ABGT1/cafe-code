@@ -6405,6 +6405,201 @@ describe("ProviderRuntimeIngestion", () => {
     expect(running.latestTurn?.startedAt).toBe(startedAt);
   });
 
+  it.each([
+    ["turn.completed", { state: "completed" }],
+    ["turn.aborted", { reason: "Synthetic interruption" }],
+    ["session.exited", { exitKind: "graceful" }],
+    ["runtime.error", { message: "Synthetic failure" }],
+    ["thread.state.changed", { state: "idle" }],
+    ["session.state.changed", { state: "ready" }],
+  ])(
+    "does not let an old %s observation race a newer accepted turn into ready",
+    async (type, payload) => {
+      const terminalDispatchStarted = Effect.runSync(Deferred.make<void>());
+      const releaseTerminalDispatch = Effect.runSync(Deferred.make<void>());
+      const oldTurn = asTurnId("completed-resume-turn");
+      const newTurn = asTurnId("newly-accepted-turn");
+      const harness = await createHarness({
+        dispatchGate: (command, dispatch) =>
+          command.type === "thread.session.set" &&
+          String(command.commandId).includes(":late-resume-completion:")
+            ? Deferred.succeed(terminalDispatchStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseTerminalDispatch)),
+                Effect.andThen(dispatch(command)),
+              )
+            : dispatch(command),
+      });
+      const oldCompletedAt = "2026-01-01T00:00:01.000Z";
+      const acceptedAt = "2026-01-01T00:00:02.000Z";
+      if (type === "turn.aborted") {
+        harness.emit({
+          type: "thread.goal.updated",
+          eventId: asEventId("active-goal-before-old-abort"),
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: oldCompletedAt,
+          payload: {
+            goal: {
+              threadId: asThreadId("thread-1"),
+              objective: "Synthetic goal",
+              status: "active",
+              tokenBudget: null,
+              tokensUsed: 0,
+              timeUsedSeconds: 0,
+              createdAt: oldCompletedAt,
+              updatedAt: oldCompletedAt,
+            },
+          },
+        });
+        await harness.drain();
+      }
+      const delayedEvent = {
+        type,
+        eventId: asEventId("late-resume-completion"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: oldTurn,
+        createdAt: oldCompletedAt,
+        payload,
+      };
+      harness.emit(delayedEvent);
+      await Effect.runPromise(Deferred.await(terminalDispatchStarted));
+
+      // Ingestion has already checked the old idle shell. The reactor's
+      // successful turn/start ACK commits before that deferred completion can
+      // enter the engine's serial command queue, exactly as during resume.
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("server:new-turn-accepted"),
+          threadId: asThreadId("thread-1"),
+          session: {
+            threadId: asThreadId("thread-1"),
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: newTurn,
+            lastError: null,
+            updatedAt: acceptedAt,
+          },
+          createdAt: acceptedAt,
+        }),
+      );
+      await Effect.runPromise(Deferred.succeed(releaseTerminalDispatch, undefined));
+      await harness.drain();
+      const thread = (await harness.readModel()).threads[0]!;
+      expect(thread.session).toMatchObject({ status: "running", activeTurnId: newTurn });
+      expect(thread.latestTurn).toMatchObject({
+        turnId: newTurn,
+        state: "running",
+        completedAt: null,
+      });
+      // A receipt replay must remain a benign rejected observation. It cannot
+      // poison ingestion or interfere with a later genuine completion.
+      harness.emit(delayedEvent);
+      harness.emit({
+        type: "turn.completed",
+        eventId: asEventId("genuine-new-turn-completion"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: newTurn,
+        createdAt: "2026-01-01T00:00:03.000Z",
+        payload: { state: "completed" },
+      });
+      await harness.drain();
+      expect((await harness.readModel()).threads[0]?.latestTurn).toMatchObject({
+        turnId: newTurn,
+        // Active-goal continuation intentionally keeps the turn row busy
+        // until the independent terminal checkpoint/next native turn arrives.
+        state: type === "turn.aborted" ? "running" : "completed",
+      });
+      if (type === "turn.aborted") {
+        // The rejected old abort must not install a cancellation barrier for
+        // the newer goal turn, even though both belong to the same thread.
+        expect((await harness.readModel()).threads[0]?.session?.status).toBe("starting");
+      }
+    },
+  );
+
+  it("preserves active turn ownership across session-ready initialization metadata", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("live-after-ready");
+    harness.emit({
+      type: "turn.started",
+      eventId: asEventId("live-before-ready"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      turnId,
+      createdAt: "2026-01-01T00:00:01.000Z",
+      payload: {},
+    });
+    await harness.drain();
+    harness.emit({
+      type: "session.state.changed",
+      eventId: asEventId("delayed-session-ready"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      payload: { state: "ready" },
+    });
+    await harness.drain();
+    const thread = (await harness.readModel()).threads[0]!;
+    expect(thread.session).toMatchObject({ status: "running", activeTurnId: turnId });
+    expect(thread.latestTurn).toMatchObject({ state: "running", completedAt: null });
+  });
+
+  it("does not let terminal resume history consume a newer pending start", async () => {
+    const harness = await createHarness();
+    const turnId = asTurnId("historical-terminal-turn");
+    for (const type of ["turn.started", "turn.completed"] as const) {
+      harness.emit({
+        type,
+        eventId: asEventId(`original-${type}`),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId,
+        createdAt:
+          type === "turn.started" ? "2026-01-01T00:00:01.000Z" : "2026-01-01T00:00:02.000Z",
+        payload: type === "turn.completed" ? { state: "completed" } : {},
+      });
+    }
+    await harness.drain();
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("new-pending-after-terminal"),
+        threadId: asThreadId("thread-1"),
+        message: {
+          messageId: asMessageId("new-pending-message"),
+          role: "user",
+          text: "synthetic",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:03.000Z",
+      }),
+    );
+    for (const type of ["turn.started", "turn.completed"] as const) {
+      harness.emit({
+        type,
+        eventId: asEventId(`historical-resume-${type}`),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId,
+        createdAt:
+          type === "turn.started" ? "2026-01-01T00:00:01.000Z" : "2026-01-01T00:00:02.000Z",
+        payload: type === "turn.completed" ? { state: "completed" } : {},
+      });
+    }
+    await harness.drain();
+    const thread = (await harness.readModel()).threads[0]!;
+    expect(thread.session).toMatchObject({ status: "starting", activeTurnId: null });
+    expect(await harness.readTurnStartBinding(asThreadId("thread-1"), null)).toMatchObject({
+      messageId: "new-pending-message",
+    });
+  });
+
   it("lets Codex turn.started repair a provisional ACK active turn id", async () => {
     const harness = await createHarness();
     const provisionalTurnId = asTurnId("turn-provisional-ack");

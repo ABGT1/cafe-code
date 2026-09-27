@@ -1,18 +1,24 @@
 import {
   CheckCircle2Icon,
   KeyRoundIcon,
+  KeyboardIcon,
   MicIcon,
   ShieldCheckIcon,
   TriangleAlertIcon,
 } from "lucide-react";
-import { DICTATION_API_KEY_MAX_CHARS, type DictationCredentialStatus } from "@cafecode/contracts";
+import {
+  DICTATION_API_KEY_MAX_CHARS,
+  type DictationCredentialStatus,
+  type GlobalDictationSettingsState,
+} from "@cafecode/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useCallback, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useState } from "react";
 
 import { usePrimaryEnvironmentId } from "~/environments/primary";
 import { requireEnvironmentConnection } from "~/environments/runtime";
 import { readDictationRpcErrorCode } from "~/dictation/errors";
 import { dictationQueryKeys, dictationStatusQueryOptions } from "~/lib/dictationReactQuery";
+import { isMacPlatform } from "~/lib/utils";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -26,6 +32,7 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Spinner } from "../ui/spinner";
+import { Switch } from "../ui/switch";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 
 type CredentialOperation = "saving" | "removing" | null;
@@ -34,6 +41,31 @@ type OperationFeedback = {
   readonly kind: "success" | "error";
   readonly message: string;
 };
+
+/** The physical key matters here: a shifted comma reports "<" on US keyboards. */
+function macShortcutFromKeyEvent(event: KeyboardEvent): string | null {
+  if (!event.metaKey || !event.shiftKey || event.altKey || event.ctrlKey) return null;
+  if (/^Key[A-Z]$/.test(event.code)) {
+    return `CommandOrControl+Shift+${event.code.slice(3)}`;
+  }
+  if (/^Digit[0-9]$/.test(event.code)) {
+    return `CommandOrControl+Shift+${event.code.slice(5)}`;
+  }
+  const punctuation: Readonly<Record<string, string>> = {
+    Comma: ",",
+    Period: ".",
+    Slash: "/",
+    Semicolon: ";",
+    Minus: "-",
+    Equal: "=",
+  };
+  const key = punctuation[event.code];
+  return key ? `CommandOrControl+Shift+${key}` : null;
+}
+
+function macShortcutLabel(shortcut: string): string {
+  return shortcut.replace(/^CommandOrControl\+Shift\+/, "⌘ ⇧ ");
+}
 
 function containsApiKeyControlCharacter(value: string): boolean {
   for (const character of value) {
@@ -122,6 +154,92 @@ export function DictationSettings() {
   const [feedback, setFeedback] = useState<OperationFeedback | null>(null);
   const [removeDialogOpen, setRemoveDialogOpen] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
+  const [globalSettings, setGlobalSettings] = useState<GlobalDictationSettingsState | null>(null);
+  const [globalSettingsPending, setGlobalSettingsPending] = useState(false);
+  const [globalSettingsError, setGlobalSettingsError] = useState<string | null>(null);
+  const [capturingShortcut, setCapturingShortcut] = useState(false);
+  const [shortcutCaptureHint, setShortcutCaptureHint] = useState<string | null>(null);
+  const isMacDesktop =
+    typeof window !== "undefined" &&
+    Boolean(window.desktopBridge) &&
+    isMacPlatform(navigator.platform);
+
+  useEffect(() => {
+    if (!isMacDesktop) return;
+    const bridge = window.desktopBridge;
+    if (!bridge) return;
+    let mounted = true;
+    setGlobalSettingsPending(true);
+    void bridge
+      .getGlobalDictationSettings()
+      .then((settings) => {
+        if (mounted) {
+          setGlobalSettings(settings);
+          setGlobalSettingsError(null);
+        }
+      })
+      .catch(() => {
+        if (mounted) setGlobalSettingsError("Could not load the Mac dictation shortcut.");
+      })
+      .finally(() => {
+        if (mounted) setGlobalSettingsPending(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [isMacDesktop]);
+
+  const updateGlobalEnabled = useCallback(async (enabled: boolean) => {
+    const bridge = window.desktopBridge;
+    if (!bridge) return;
+    setGlobalSettingsPending(true);
+    setGlobalSettingsError(null);
+    try {
+      setGlobalSettings(await bridge.setGlobalDictationEnabled(enabled));
+    } catch {
+      setGlobalSettingsError("Could not update global dictation. Try again.");
+    } finally {
+      setGlobalSettingsPending(false);
+    }
+  }, []);
+
+  const updateGlobalShortcut = useCallback(async (shortcut: string) => {
+    const bridge = window.desktopBridge;
+    if (!bridge) return;
+    setGlobalSettingsPending(true);
+    setGlobalSettingsError(null);
+    try {
+      setGlobalSettings(await bridge.setGlobalDictationShortcut(shortcut));
+      setCapturingShortcut(false);
+      setShortcutCaptureHint(null);
+    } catch {
+      setShortcutCaptureHint("Could not set this shortcut. Choose another combination.");
+    } finally {
+      setGlobalSettingsPending(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!capturingShortcut) return;
+    const capture = (event: KeyboardEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "Escape") {
+        setCapturingShortcut(false);
+        setShortcutCaptureHint(null);
+        return;
+      }
+      if (event.repeat || ["Meta", "Shift", "Control", "Alt"].includes(event.key)) return;
+      const shortcut = macShortcutFromKeyEvent(event);
+      if (shortcut === null) {
+        setShortcutCaptureHint("Press ⌘ ⇧ with a letter, number, or punctuation key.");
+        return;
+      }
+      void updateGlobalShortcut(shortcut);
+    };
+    window.addEventListener("keydown", capture, true);
+    return () => window.removeEventListener("keydown", capture, true);
+  }, [capturingShortcut, updateGlobalShortcut]);
 
   const status = statusQuery.data;
   const configured = status?.configured === true;
@@ -341,6 +459,75 @@ export function DictationSettings() {
           </form>
         </SettingsRow>
       </SettingsSection>
+
+      {isMacDesktop ? (
+        <SettingsSection
+          title="Dictate anywhere on Mac"
+          icon={<KeyboardIcon className="size-3.5" />}
+        >
+          <SettingsRow
+            title="Global dictation shortcut"
+            description="Open a floating recorder from another Mac app. Review and edit the text before choosing Copy, Save, or Insert. Insertion needs macOS Accessibility permission."
+            status={
+              <span
+                aria-live="polite"
+                role={globalSettingsError || globalSettings?.error ? "alert" : undefined}
+              >
+                {globalSettingsError ||
+                  globalSettings?.error ||
+                  (globalSettings?.enabled
+                    ? globalSettings.registered
+                      ? "Ready. Press the shortcut to start, then press it again to stop."
+                      : "The shortcut is not registered. Choose another combination."
+                    : "Off until you enable it. Microphone audio is sent only while recording.")}
+              </span>
+            }
+            control={
+              <Switch
+                aria-label="Enable Mac global dictation"
+                checked={globalSettings?.enabled ?? false}
+                disabled={!globalSettings || globalSettingsPending || !configured}
+                onCheckedChange={(enabled) => void updateGlobalEnabled(enabled)}
+              />
+            }
+          />
+          <SettingsRow
+            title="Keyboard shortcut"
+            description="Hold Command and Shift, then press one letter, number, or punctuation key. Escape cancels shortcut capture."
+            status={
+              shortcutCaptureHint ? (
+                <span className="text-destructive" role="alert">
+                  {shortcutCaptureHint}
+                </span>
+              ) : null
+            }
+            control={
+              <div className="flex items-center gap-2">
+                <kbd className="rounded-md border border-border bg-muted/40 px-2 py-1 text-xs font-medium text-foreground">
+                  {globalSettings ? macShortcutLabel(globalSettings.shortcut) : "⌘ ⇧ ,"}
+                </kbd>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={!globalSettings || globalSettingsPending}
+                  onClick={() => {
+                    setShortcutCaptureHint(null);
+                    setCapturingShortcut((current) => !current);
+                  }}
+                >
+                  {capturingShortcut ? "Cancel" : "Change"}
+                </Button>
+              </div>
+            }
+          />
+          <p className="border-t border-border/60 px-5 py-3 text-xs text-muted-foreground">
+            This Mac-only shortcut is stored locally. Cafe Code never inserts dictated text into
+            another app until you click Insert. If insertion cannot be verified, your editable draft
+            stays in the floating window for Copy or Save.
+          </p>
+        </SettingsSection>
+      ) : null}
 
       <SettingsSection title="Security & access" icon={<ShieldCheckIcon className="size-3.5" />}>
         <SettingsRow

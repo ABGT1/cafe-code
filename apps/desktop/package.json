@@ -9,7 +9,7 @@
     "dev": "node scripts/dev.mjs",
     "dev:bundle": "tsdown --watch",
     "dev:electron": "node scripts/dev-electron.mjs",
-    "build": "tsdown",
+    "build": "node scripts/build-desktop.mjs",
     "start": "node scripts/start-electron.mjs",
     "start:debug": "node scripts/start-electron.mjs --cafe-debug",
     "typecheck": "tsc --noEmit",

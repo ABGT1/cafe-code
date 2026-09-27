@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
+import { ensureMacDictationHelper } from "./build-mac-dictation-helper.mjs";
 import { linuxSafeStorageElectronArgs } from "./linux-safe-storage.mjs";
 
 const isolateChildProcessGroup = process.platform !== "win32";
@@ -118,6 +119,9 @@ export function runStartElectron({
 } = {}) {
   const childEnv = buildDesktopChildEnv(environment);
   const plan = resolveLaunchPlan({ args, environment: childEnv, cwd });
+  if (plan.type === "electron") {
+    ensureMacDictationHelper();
+  }
   const child = spawnLaunchPlan(plan, childEnv);
 
   let shuttingDown = false;

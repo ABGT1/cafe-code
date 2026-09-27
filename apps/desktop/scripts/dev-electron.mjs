@@ -3,6 +3,7 @@ import { watch } from "node:fs";
 import { join } from "node:path";
 
 import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
+import { ensureMacDictationHelper } from "./build-mac-dictation-helper.mjs";
 import { terminateDesktopDevApps } from "./dev-process-cleanup.mjs";
 import { linuxSafeStorageElectronArgs } from "./linux-safe-storage.mjs";
 import { waitForResources } from "./wait-for-resources.mjs";
@@ -17,6 +18,10 @@ const port = Number.parseInt(devServer.port, 10);
 if (!Number.isInteger(port) || port <= 0) {
   throw new Error(`VITE_DEV_SERVER_URL must include an explicit port: ${devServerUrl}`);
 }
+
+// This child is also exposed as a direct workspace script. Ensure that path
+// has the same native prerequisite as the combined development supervisor.
+ensureMacDictationHelper();
 
 const requiredFiles = [
   "dist-electron/main.cjs",

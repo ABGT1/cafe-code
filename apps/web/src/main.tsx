@@ -7,7 +7,6 @@ import "@xterm/xterm/css/xterm.css";
 import "./index.css";
 
 import { isElectron } from "./env";
-import { getRouter } from "./router";
 import { APP_DISPLAY_NAME } from "./branding";
 import { syncDocumentWindowControlsOverlayClass } from "./lib/windowControlsOverlay";
 import { installMobileDebugLogging } from "./lib/mobileDebugLog";
@@ -33,19 +32,33 @@ if (
   });
 }
 
-// Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
-const history = isElectron ? createHashHistory() : createBrowserHistory();
+if (isElectron && new URLSearchParams(window.location.search).get("cafeDictationOverlay") === "1") {
+  // The macOS recording panel deliberately has no project router, sidebar,
+  // providers, or ordinary composer. Its restricted preload and desktop-main
+  // window identity define the security boundary; this branch only removes
+  // unrelated UI/lifecycle work from a lightweight auxiliary renderer.
+  void import("./globalDictation/entry").then(({ mountGlobalDictation }) =>
+    mountGlobalDictation(document.getElementById("root") as HTMLElement),
+  );
+} else {
+  // Import the application graph only for an ordinary app window. Route
+  // modules initialize desktop services at module load time, before React
+  // mounts; loading them in the restricted dictation renderer previously
+  // called an unavailable theme bridge method and prevented its ready IPC.
+  void import("./router").then(({ getRouter }) => {
+    // Hash history avoids path resolution issues in the Electron shell.
+    const history = isElectron ? createHashHistory() : createBrowserHistory();
+    const router = getRouter(history);
 
-const router = getRouter(history);
+    if (isElectron) {
+      syncDocumentWindowControlsOverlayClass();
+    }
 
-if (isElectron) {
-  syncDocumentWindowControlsOverlayClass();
+    document.title = APP_DISPLAY_NAME;
+    ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+      <React.StrictMode>
+        <RouterProvider router={router} />
+      </React.StrictMode>,
+    );
+  });
 }
-
-document.title = APP_DISPLAY_NAME;
-
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>
-    <RouterProvider router={router} />
-  </React.StrictMode>,
-);

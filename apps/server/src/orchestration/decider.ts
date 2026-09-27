@@ -19,6 +19,7 @@ import {
   requireThreadNotArchived,
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
+import { SESSION_LIFECYCLE_SUPERSEDED, sessionLifecycleSnapshot } from "./sessionLifecycle.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -1144,6 +1145,33 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      const expectedLifecycle = command.expectedSessionLifecycle;
+      const currentLifecycle = sessionLifecycleSnapshot(thread.session);
+      const sameConcreteLifecycle =
+        expectedLifecycle != null &&
+        currentLifecycle !== null &&
+        expectedLifecycle.activeTurnId !== null &&
+        expectedLifecycle.activeTurnId === currentLifecycle.activeTurnId &&
+        expectedLifecycle.status === currentLifecycle.status &&
+        expectedLifecycle.providerName === currentLifecycle.providerName &&
+        expectedLifecycle.providerInstanceId === currentLifecycle.providerInstanceId;
+      if (
+        expectedLifecycle !== undefined &&
+        !sameConcreteLifecycle &&
+        !isDeepStrictEqual(expectedLifecycle, currentLifecycle)
+      ) {
+        // Provider ingestion runs independently of user intent/ACK admission.
+        // Recheck its captured tuple here, where a later start or Stop cannot
+        // interleave with the resulting session mutation. Provider clocks are
+        // not an ordering authority, so deliberately compare identity/state
+        // rather than rejecting all events with older timestamps. A heartbeat
+        // can change only the clock for the exact same concrete active turn;
+        // it must not invalidate that turn's genuine terminal notification.
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: SESSION_LIFECYCLE_SUPERSEDED,
+        });
+      }
       const replacement = command.codexRootReplacement;
       if (
         replacement !== undefined &&

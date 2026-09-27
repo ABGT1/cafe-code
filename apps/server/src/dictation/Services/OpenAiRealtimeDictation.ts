@@ -2,6 +2,8 @@ import type {
   DictationCredentialStatus,
   DictationError,
   DictationRealtimeClientSecret,
+  DictationRewriteTextInput,
+  DictationRewriteTextResult,
   DictationTranscriptionModel,
 } from "@cafecode/contracts";
 import * as Context from "effect/Context";
@@ -22,6 +24,14 @@ export interface OpenAiRealtimeDictationShape {
     readonly safetyIdentifier: string;
     readonly model?: DictationTranscriptionModel;
   }) => Effect.Effect<DictationRealtimeClientSecret, DictationError>;
+  /**
+   * Performs one deliberately consented, bounded, stateless text rewrite.
+   * The caller must already have authorized the Cafe owner/transport; the
+   * permanent key remains in the server secret store and never reaches UI.
+   */
+  readonly rewriteText: (
+    input: DictationRewriteTextInput & { readonly safetyIdentifier: string },
+  ) => Effect.Effect<DictationRewriteTextResult, DictationError>;
 }
 
 export class OpenAiRealtimeDictation extends Context.Service<
