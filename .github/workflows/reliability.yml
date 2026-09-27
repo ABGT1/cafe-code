@@ -95,6 +95,25 @@ jobs:
         if: runner.os == 'Windows'
         run: node scripts/windows-process-ownership-smoke.ts
       - run: corepack yarn ${{ matrix.build }}
+      - name: Record Windows installer identity
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ownershipInstallers = @(Get-ChildItem -LiteralPath release -File -Filter '*.exe')
+          if ($ownershipInstallers.Count -ne 1) {
+            throw 'Expected exactly one isolated Windows installer artifact.'
+          }
+          $ownershipInstaller = $ownershipInstallers[0]
+          $ownershipDigest = Get-FileHash -LiteralPath $ownershipInstaller.FullName -Algorithm SHA256
+          $ownershipSource = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Could not identify the checked-out source.' }
+          [ordered]@{
+            phase = 'windows-installer-identity'
+            source = $ownershipSource
+            file = $ownershipInstaller.Name
+            bytes = $ownershipInstaller.Length
+            sha256 = $ownershipDigest.Hash.ToLowerInvariant()
+          } | ConvertTo-Json -Compress
       # Each smoke installs/launches in a test-owned environment, verifies
       # readiness rather than merely absence of errors, and cleans up its PIDs.
       - if: runner.os != 'Linux'
