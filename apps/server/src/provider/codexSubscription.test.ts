@@ -9,8 +9,9 @@ import {
 describe("Codex subscription presentation", () => {
   it.each([
     ["plus", "ChatGPT Plus Subscription"],
-    ["prolite", "ChatGPT Pro 5x Subscription"],
-    ["pro", "ChatGPT Pro 20x Subscription"],
+    ["prolite", "ChatGPT Pro Subscription"],
+    ["pro", "ChatGPT Pro (More) Subscription"],
+    ["promax", "ChatGPT Pro (Max) Subscription"],
     ["free", "ChatGPT Free Subscription"],
     ["go", "ChatGPT Go Subscription"],
     ["business", "ChatGPT Business Subscription"],
@@ -31,17 +32,34 @@ describe("Codex subscription presentation", () => {
   const auth = {
     status: "authenticated",
     type: "chatgpt",
-    label: "ChatGPT Pro 20x Subscription",
+    label: "ChatGPT Pro (More) Subscription",
     email: "subscriber@example.com",
   } as const satisfies ServerProvider["auth"];
 
   it("updates only the label and preserves account identity", () => {
     expect(codexAuthWithSubscriptionPlan(auth, "prolite")).toEqual({
       ...auth,
-      label: "ChatGPT Pro 5x Subscription",
+      label: "ChatGPT Pro Subscription",
+    });
+    expect(codexAuthWithSubscriptionPlan(auth, "promax")).toEqual({
+      ...auth,
+      label: "ChatGPT Pro (Max) Subscription",
     });
     expect(codexAuthWithSubscriptionPlan(auth, "pro")).toBe(auth);
   });
+
+  it.each(["ChatGPT Pro 5x Subscription", "ChatGPT Pro 20x Subscription"])(
+    "retains cached legacy presentation %s until a current plan is reported",
+    (label) => {
+      const cachedAuth = { ...auth, label };
+      expect(codexAuthWithSubscriptionPlan(cachedAuth, undefined)).toBe(cachedAuth);
+      expect(codexAuthWithSubscriptionPlan(cachedAuth, null)).toBe(cachedAuth);
+      expect(codexAuthWithSubscriptionPlan(cachedAuth, "promax")).toEqual({
+        ...cachedAuth,
+        label: "ChatGPT Pro (Max) Subscription",
+      });
+    },
+  );
 
   it("keeps known presentation on missing sparse metadata, not on an unknown tier", () => {
     expect(codexAuthWithSubscriptionPlan(auth, undefined)).toBe(auth);
@@ -63,6 +81,7 @@ describe("Codex subscription presentation", () => {
     "never promotes or relabels other authentication: %j",
     (other) => {
       expect(codexAuthWithSubscriptionPlan(other, "pro")).toBe(other);
+      expect(codexAuthWithSubscriptionPlan(other, "promax")).toBe(other);
     },
   );
 });

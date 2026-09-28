@@ -5,12 +5,16 @@ import type * as CodexSchema from "effect-codex-app-server/schema";
 // lightweight usage endpoint carries the same plan names as an open string;
 // never echo an unknown upstream value or infer a tier from quota percentages.
 // https://learn.chatgpt.com/docs/app-server#authentication-modes
+// Pro-family names follow Codex 0.158.0's presentation, not a guessed quota
+// multiplier: codex-rs/tui/src/status/helpers.rs at the immutable source below.
+// https://github.com/openai/codex/blob/064c6b8c737f5b41d171fdda80bd9ef10ad06eb3/codex-rs/tui/src/status/helpers.rs#L100-L118
 const CODEX_SUBSCRIPTION_LABELS = {
   free: "ChatGPT Free Subscription",
   go: "ChatGPT Go Subscription",
   plus: "ChatGPT Plus Subscription",
-  pro: "ChatGPT Pro 20x Subscription",
-  prolite: "ChatGPT Pro 5x Subscription",
+  pro: "ChatGPT Pro (More) Subscription",
+  prolite: "ChatGPT Pro Subscription",
+  promax: "ChatGPT Pro (Max) Subscription",
   team: "ChatGPT Team Subscription",
   self_serve_business_prolite: "ChatGPT Business ProLite Subscription",
   self_serve_business_usage_based: "ChatGPT Business Subscription",

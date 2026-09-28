@@ -345,7 +345,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           assert.strictEqual(status.version, "1.0.0");
           assert.strictEqual(status.auth.status, "authenticated");
           assert.strictEqual(status.auth.type, "chatgpt");
-          assert.strictEqual(status.auth.label, "ChatGPT Pro 20x Subscription");
+          assert.strictEqual(status.auth.label, "ChatGPT Pro (More) Subscription");
           assert.strictEqual(status.auth.email, "test@example.com");
           assert.deepStrictEqual(status.models, [
             {
@@ -364,6 +364,28 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               shortDescription: "Debug failing GitHub Actions checks",
             },
           ]);
+        }),
+      );
+
+      it.effect("labels the Codex promax account without inferring a quota multiplier", () =>
+        Effect.gen(function* () {
+          const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+            Effect.succeed(
+              makeCodexProbeSnapshot({
+                account: {
+                  account: {
+                    type: "chatgpt",
+                    email: "max@example.com",
+                    planType: "promax",
+                  },
+                  requiresOpenaiAuth: false,
+                },
+              }),
+            ),
+          );
+
+          assert.strictEqual(status.auth.status, "authenticated");
+          assert.strictEqual(status.auth.label, "ChatGPT Pro (Max) Subscription");
         }),
       );
 
@@ -1457,7 +1479,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             assert.deepStrictEqual(yield* registry.refreshInstanceAccountUsage(codexInstanceId), [
               {
                 ...usageRefreshedProvider,
-                auth: { ...cachedProvider.auth, label: "ChatGPT Pro 5x Subscription" },
+                auth: { ...cachedProvider.auth, label: "ChatGPT Pro Subscription" },
               },
             ]);
             assert.deepStrictEqual(yield* registry.refreshInstanceModels!(codexInstanceId), [
@@ -1480,20 +1502,24 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               "ChatGPT Subscription",
             );
             for (const update of [
-              { limitId: "codex", planType: "pro", expected: "ChatGPT Pro 20x Subscription" },
-              { limitId: "codex", planType: undefined, expected: "ChatGPT Pro 20x Subscription" },
+              { limitId: "codex", planType: "pro", expected: "ChatGPT Pro (More) Subscription" },
+              { limitId: "codex", planType: "promax", expected: "ChatGPT Pro (Max) Subscription" },
+              { limitId: "codex", planType: undefined, expected: "ChatGPT Pro (Max) Subscription" },
+              { limitId: "codex", planType: null, expected: "ChatGPT Pro (Max) Subscription" },
               {
                 limitId: "codex_bengalfox",
                 planType: "plus",
-                expected: "ChatGPT Pro 20x Subscription",
+                expected: "ChatGPT Pro (Max) Subscription",
               },
+              { limitId: "codex", planType: "unknown", expected: "ChatGPT Subscription" },
+              { limitId: "codex", planType: "future-plan", expected: "ChatGPT Subscription" },
               { limitId: "codex", planType: "plus", expected: "ChatGPT Plus Subscription" },
             ]) {
               yield* registry.updateProviderAccountRateLimits({
                 instanceId: codexInstanceId,
                 limitId: update.limitId,
                 snapshot: {
-                  ...(update.planType ? { planType: update.planType } : {}),
+                  ...(update.planType !== undefined ? { planType: update.planType } : {}),
                   primary: { usedPercent: 22 },
                 },
                 checkedAt: "2026-04-29T10:03:00.000Z",
@@ -2324,16 +2350,19 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
 
           for (const testCase of [
             { plan: "plus", label: "ChatGPT Plus Subscription" },
-            { plan: "prolite", label: "ChatGPT Pro 5x Subscription" },
-            { plan: "pro", label: "ChatGPT Pro 20x Subscription" },
+            { plan: "prolite", label: "ChatGPT Pro Subscription" },
+            { plan: "pro", label: "ChatGPT Pro (More) Subscription" },
+            { plan: "promax", label: "ChatGPT Pro (Max) Subscription" },
             { plan: undefined, label: "ChatGPT Subscription" },
+            { plan: null, label: "ChatGPT Subscription" },
+            { plan: "unknown", label: "ChatGPT Subscription" },
             { plan: "unrecognized-plan", label: "ChatGPT Subscription" },
           ]) {
             let fetchCount = 0;
             globalThis.fetch = (async () => {
               fetchCount += 1;
               return Response.json({
-                ...(testCase.plan ? { plan_type: testCase.plan } : {}),
+                ...(testCase.plan !== undefined ? { plan_type: testCase.plan } : {}),
                 rate_limit: { primary_window: { used_percent: 10 } },
               });
             }) as typeof fetch;
@@ -2373,7 +2402,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             let fetchCount = 0;
             globalThis.fetch = (async () => {
               fetchCount += 1;
-              return Response.json({ plan_type: "pro" });
+              return Response.json({ plan_type: "promax" });
             }) as typeof fetch;
             const status = yield* checkCodexCliProviderStatus(
               decodeCodexSettings({ homePath }),
@@ -2513,7 +2542,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           assert.strictEqual(seenHeaders[0]?.["ChatGPT-Account-ID"], "account-id");
           assert.strictEqual(seenHeaders[0]?.["X-OpenAI-Fedramp"], "true");
           assert.strictEqual(status.accountRateLimits?.rateLimits.planType, "pro");
-          assert.strictEqual(status.auth.label, "ChatGPT Pro 20x Subscription");
+          assert.strictEqual(status.auth.label, "ChatGPT Pro (More) Subscription");
           assert.strictEqual(status.accountRateLimits?.rateLimits.primary?.windowDurationMins, 300);
           assert.strictEqual(status.accountRateLimits?.rateLimits.secondary?.usedPercent, 75);
           assert.strictEqual(status.accountRateLimits?.rateLimits.spendControlReached, true);

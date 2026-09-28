@@ -2616,79 +2616,86 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }),
   );
 
-  it.effect("preserves a failed root outcome while later routed child work stays observable", () =>
-    Effect.gen(function* () {
-      const { adapter, runtime } = yield* startLifecycleRuntime();
-      const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
-        Stream.runCollect,
-        Effect.forkChild,
-      );
-      yield* runtime.emit({
-        id: asEventId("evt-capacity-root-terminal"),
-        kind: "notification",
-        provider: ProviderDriverKind.make("codex"),
-        createdAt: "2026-09-05T00:00:00.000Z",
-        method: "turn/completed",
-        threadId: asThreadId("thread-1"),
-        turnId: asTurnId("turn-parent"),
-        payload: {
-          threadId: "provider-thread-1",
-          turn: {
-            id: "turn-parent",
-            status: "failed",
-            items: [],
-            itemsView: "notLoaded",
-            error: {
-              message: "Selected model is at capacity",
-              codexErrorInfo: "serverOverloaded",
-              additionalDetails: null,
+  for (const failure of [
+    { code: "serverOverloaded", message: "Selected model is at capacity" },
+    { code: "flexUnavailable", message: "Flex capacity is temporarily unavailable" },
+  ] as const) {
+    it.effect(
+      `preserves a ${failure.code} root failure while later child work stays observable`,
+      () =>
+        Effect.gen(function* () {
+          const { adapter, runtime } = yield* startLifecycleRuntime();
+          const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+          yield* runtime.emit({
+            id: asEventId("evt-capacity-root-terminal"),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            createdAt: "2026-09-05T00:00:00.000Z",
+            method: "turn/completed",
+            threadId: asThreadId("thread-1"),
+            turnId: asTurnId("turn-parent"),
+            payload: {
+              threadId: "provider-thread-1",
+              turn: {
+                id: "turn-parent",
+                status: "failed",
+                items: [],
+                itemsView: "notLoaded",
+                error: {
+                  message: failure.message,
+                  codexErrorInfo: failure.code,
+                  additionalDetails: null,
+                },
+              },
             },
-          },
-        },
-      } satisfies ProviderEvent);
-      yield* runtime.emit({
-        id: asEventId("evt-child-after-capacity-root"),
-        kind: "notification",
-        provider: ProviderDriverKind.make("codex"),
-        createdAt: "2026-09-05T00:00:01.000Z",
-        method: "codex.subagent/itemCompleted",
-        threadId: asThreadId("thread-1"),
-        turnId: asTurnId("turn-parent"),
-        itemId: asItemId("child-progress"),
-        payload: {
-          completedAtMs: 1_788_566_401_000,
-          threadId: "provider-child",
-          turnId: "native-child-turn",
-          item: {
-            type: "reasoning",
-            id: "child-progress",
-            summary: ["Finishing child work"],
-            content: [],
-          },
-        },
-      } satisfies ProviderEvent);
-      const events = Array.from(yield* Fiber.join(eventsFiber));
-      assert.deepStrictEqual(
-        events.map((event) => event.type),
-        ["turn.completed", "task.progress"],
-      );
-      const terminal = events[0];
-      assert.equal(
-        terminal?.type === "turn.completed" ? terminal.payload.state : undefined,
-        "failed",
-      );
-      assert.equal(
-        terminal?.type === "turn.completed" ? terminal.payload.errorMessage : undefined,
-        "Selected model is at capacity",
-      );
-      const child = events[1];
-      assert.equal(
-        child?.type === "task.progress" ? child.payload.subagent?.threadId : undefined,
-        "provider-child",
-      );
-      assert.equal(child?.turnId, "turn-parent");
-    }),
-  );
+          } satisfies ProviderEvent);
+          yield* runtime.emit({
+            id: asEventId("evt-child-after-capacity-root"),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            createdAt: "2026-09-05T00:00:01.000Z",
+            method: "codex.subagent/itemCompleted",
+            threadId: asThreadId("thread-1"),
+            turnId: asTurnId("turn-parent"),
+            itemId: asItemId("child-progress"),
+            payload: {
+              completedAtMs: 1_788_566_401_000,
+              threadId: "provider-child",
+              turnId: "native-child-turn",
+              item: {
+                type: "reasoning",
+                id: "child-progress",
+                summary: ["Finishing child work"],
+                content: [],
+              },
+            },
+          } satisfies ProviderEvent);
+          const events = Array.from(yield* Fiber.join(eventsFiber));
+          assert.deepStrictEqual(
+            events.map((event) => event.type),
+            ["turn.completed", "task.progress"],
+          );
+          const terminal = events[0];
+          assert.equal(
+            terminal?.type === "turn.completed" ? terminal.payload.state : undefined,
+            "failed",
+          );
+          assert.equal(
+            terminal?.type === "turn.completed" ? terminal.payload.errorMessage : undefined,
+            failure.message,
+          );
+          const child = events[1];
+          assert.equal(
+            child?.type === "task.progress" ? child.payload.subagent?.threadId : undefined,
+            "provider-child",
+          );
+          assert.equal(child?.turnId, "turn-parent");
+        }),
+    );
+  }
 
   it.effect("maps the final Codex notification burst through the canonical bridge", () =>
     Effect.gen(function* () {
@@ -2992,6 +2999,47 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       assert.equal(firstEvent.value.turnId, "turn-1");
       assert.equal(firstEvent.value.payload.message, "Reconnecting... 2/5");
     }),
+  );
+
+  it.effect(
+    "preserves Flex failure detail without treating it as a retryable transport error",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+        // The new terminal classification must decode through the same typed
+        // boundary as older failures. A rejected payload loses both its useful
+        // message and willRetry semantics; the native terminal event must remain
+        // authoritative rather than suggesting a fresh transport retry.
+        yield* runtime.emit({
+          id: asEventId("evt-flex-error"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-09-28T00:00:00.000Z",
+          method: "error",
+          turnId: asTurnId("turn-1"),
+          payload: {
+            threadId: "provider-thread-1",
+            turnId: "turn-1",
+            error: {
+              message: "Flex capacity is temporarily unavailable",
+              codexErrorInfo: "flexUnavailable",
+              additionalDetails: null,
+            },
+            willRetry: false,
+          },
+        } satisfies ProviderEvent);
+
+        const firstEvent = yield* Fiber.join(firstEventFiber);
+        assert.equal(firstEvent._tag, "Some");
+        if (firstEvent._tag !== "Some") return;
+        assert.equal(firstEvent.value.type, "runtime.error");
+        if (firstEvent.value.type !== "runtime.error") return;
+        assert.equal(firstEvent.value.turnId, "turn-1");
+        assert.equal(firstEvent.value.payload.class, "provider_error");
+        assert.equal(firstEvent.value.payload.message, "Flex capacity is temporarily unavailable");
+      }),
   );
 
   it.effect("maps terminal Codex subagent errors to work-log warnings", () =>

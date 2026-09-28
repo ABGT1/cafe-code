@@ -35,6 +35,76 @@ const isTurnUserInput = Schema.is(CodexSchema.V2TurnStartParams__UserInput);
 const decodeResumeContent = Schema.decodeUnknownSync(CodexSchema.V2ThreadResumeParams__ContentItem);
 const isResumeContent = Schema.is(CodexSchema.V2ThreadResumeParams__ContentItem);
 const decodeCatalogModel = Schema.decodeUnknownSync(CodexSchema.V2ModelListResponse__Model);
+const decodeAccountResponse = Schema.decodeUnknownSync(
+  CodexSchema.CLIENT_REQUEST_RESPONSES["account/read"],
+);
+const isErrorNotification = Schema.is(CodexSchema.V2ErrorNotification);
+
+it("preserves Codex 0.158 Pro Max account and rate-limit metadata", () => {
+  const account = {
+    account: { type: "chatgpt", email: null, planType: "promax" },
+    requiresOpenaiAuth: true,
+  } as const;
+  assert.deepEqual(decodeAccountResponse(account), account);
+
+  // Account and quota notifications inline their own copies of the upstream
+  // plan enum. Exercise the complete wire envelopes so adding the new plan
+  // cannot accidentally leave one live account channel unable to decode it.
+  const accountUpdated = {
+    method: "account/updated",
+    params: { authMode: "chatgpt", planType: "promax" },
+  } as const;
+  const rateLimitsUpdated = {
+    method: "account/rateLimits/updated",
+    params: { rateLimits: { planType: "promax" } },
+  } as const;
+  assert.deepEqual(decodeServerNotification(accountUpdated), accountUpdated);
+  assert.deepEqual(decodeServerNotification(rateLimitsUpdated), rateLimitsUpdated);
+  assert.equal(isAccountRateLimitPlanType("promax"), true);
+  assert.equal(isAccountRateLimitPlanType("pro-max"), false);
+});
+
+it("decodes Codex 0.158 Flex capacity failures without losing terminal notifications", () => {
+  const error = {
+    message: "Flex capacity is unavailable.",
+    codexErrorInfo: "flexUnavailable",
+    additionalDetails: null,
+    misalignment: null,
+  } as const;
+  const failed = {
+    method: "error",
+    params: { threadId: "thread-1", turnId: "turn-1", willRetry: false, error },
+  } as const;
+  const completed = {
+    method: "turn/completed",
+    params: {
+      threadId: "thread-1",
+      turn: {
+        id: "turn-1",
+        items: [],
+        itemsView: "full",
+        status: "failed",
+        error,
+        startedAt: null,
+        completedAt: null,
+        durationMs: null,
+      },
+    },
+  } as const;
+
+  // A new error discriminator must survive both the live failure and the
+  // terminal-turn envelope; rejecting either can strand an otherwise settled
+  // Cafe turn. The provider's explicit willRetry/status remain authoritative.
+  assert.deepEqual(decodeServerNotification(failed), failed);
+  assert.deepEqual(decodeServerNotification(completed), completed);
+  assert.equal(
+    isErrorNotification({
+      ...failed.params,
+      error: { ...error, codexErrorInfo: "flex-unavailable" },
+    }),
+    false,
+  );
+});
 
 it("keeps Codex 0.157 gateway login capability opt-in and its responses typed", () => {
   const decodeCapabilities = Schema.decodeUnknownSync(
@@ -166,7 +236,7 @@ it("preserves Codex 0.157 MCP origins and explicit resource targets without requ
   );
 });
 
-it("decodes Codex 0.157 hosted plugin extensions while retaining older summaries", () => {
+it("accepts older plugin summaries while dropping extensions retired in Codex 0.158", () => {
   const decodePlugin = Schema.decodeUnknownSync(CodexSchema.V2PluginListResponse__PluginSummary);
   const legacy = {
     id: "plugin-example",
@@ -178,7 +248,7 @@ it("decodes Codex 0.157 hosted plugin extensions while retaining older summaries
     authPolicy: "ON_USE",
   } as const;
   assert.deepEqual(decodePlugin(legacy), legacy);
-  assert.deepEqual(decodePlugin({ ...legacy, extensions: null }), { ...legacy, extensions: null });
+  assert.deepEqual(decodePlugin({ ...legacy, extensions: null }), legacy);
   const entrypoint = {
     type: "file",
     appId: "app-example",
@@ -196,16 +266,10 @@ it("decodes Codex 0.157 hosted plugin extensions while retaining older summaries
     fileHandlers: [entrypoint],
     searchMentionProviders: [],
   };
-  assert.deepEqual(decodePlugin({ ...legacy, extensions }), { ...legacy, extensions });
-  // These are descriptive provider records. Recognizing them does not grant
-  // Cafe a resource host or authorize the tool calls named by an extension.
-  assert.equal(
-    Schema.is(CodexSchema.V2PluginListResponse__PluginSummary)({
-      ...legacy,
-      extensions: { ...extensions, fileHandlers: [{ ...entrypoint, type: "unknown" }] },
-    }),
-    false,
-  );
+  // Installed older runtimes may still send this now-retired field. Keep the
+  // supported summary usable, but do not preserve obsolete tool arguments,
+  // resource locations, or extension metadata beyond the generated boundary.
+  assert.deepEqual(decodePlugin({ ...legacy, extensions }), legacy);
 });
 
 it("preserves Codex 0.156 image alternatives and their shared discriminant", () => {

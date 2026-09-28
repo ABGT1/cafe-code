@@ -23,6 +23,10 @@ function makeProvider(overrides: Partial<ServerProvider> = {}): ServerProvider {
 describe("Codex subscription provider summary", () => {
   it.each([
     "ChatGPT Plus Subscription",
+    "ChatGPT Pro Subscription",
+    "ChatGPT Pro (More) Subscription",
+    "ChatGPT Pro (Max) Subscription",
+    // Cached labels from older backends stay displayable until fresh metadata.
     "ChatGPT Pro 5x Subscription",
     "ChatGPT Pro 20x Subscription",
   ])("preserves the server-reported %s label", (label) => {
