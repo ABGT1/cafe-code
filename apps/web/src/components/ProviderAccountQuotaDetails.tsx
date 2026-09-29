@@ -25,7 +25,7 @@ export function UsageMeterBar(props: { readonly percent: number; readonly testId
  * the bottom outside that scroll region so account-wide availability is clear. */
 export function ProviderAccountQuotaDetails(props: {
   readonly presentation: CodexRateLimitPresentation;
-  readonly layout?: "compact" | "popover" | "panel";
+  readonly layout?: "compact" | "popover" | "panel" | "settings";
   readonly action?: ReactNode;
 }) {
   const { presentation } = props;
@@ -35,8 +35,10 @@ export function ProviderAccountQuotaDetails(props: {
       className={cn(
         "flex min-h-0 min-w-0 flex-col gap-1.5 text-xs leading-snug text-muted-foreground/80 [overflow-wrap:anywhere]",
         layout === "popover" && "max-w-[min(28rem,calc(100vw-2rem))]",
+        layout === "settings" && "@container/account-quota",
       )}
       data-account-quota
+      data-account-quota-layout={layout}
     >
       {props.action ? (
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
@@ -68,7 +70,17 @@ export function ProviderAccountQuotaDetails(props: {
                 return (
                   <div
                     key={kind}
-                    className="min-w-0 space-y-1"
+                    className={cn(
+                      "min-w-0",
+                      // Settings has a full-width card, unlike the composer
+                      // popover/rail. Use its own available width to keep a
+                      // window's percentage and reset schedule on one row;
+                      // only genuinely narrow cards stack the timestamp.
+                      layout === "settings"
+                        ? "grid items-baseline gap-x-6 gap-y-1 @min-[40rem]/account-quota:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]"
+                        : "space-y-1",
+                    )}
+                    data-account-quota-window={kind}
                     data-session-rail-rate-limit={layout === "panel" ? kind : undefined}
                   >
                     {window ? (
@@ -94,13 +106,27 @@ export function ProviderAccountQuotaDetails(props: {
                         </div>
                       )
                     ) : null}
-                    {reset ? <p>{reset}</p> : null}
+                    {reset ? (
+                      <p className={layout === "settings" && !window ? "col-span-full" : undefined}>
+                        {reset}
+                      </p>
+                    ) : null}
                   </div>
                 );
               })}
-              {bucket.details.map((line) => (
-                <p key={line.label}>{line.text}</p>
-              ))}
+              {layout === "settings" && bucket.details.length > 0 ? (
+                // Keep exact provider values, but do not make every credit or
+                // spend-status field consume a full row on a wide desktop.
+                <div className="flex min-w-0 flex-wrap gap-x-5 gap-y-1" data-account-quota-metadata>
+                  {bucket.details.map((line) => (
+                    <p key={line.label} className="min-w-0 max-w-full">
+                      {line.text}
+                    </p>
+                  ))}
+                </div>
+              ) : (
+                bucket.details.map((line) => <p key={line.label}>{line.text}</p>)
+              )}
             </section>
           ))}
         </div>

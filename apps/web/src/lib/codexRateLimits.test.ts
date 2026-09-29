@@ -252,32 +252,109 @@ describe("codexRateLimits", () => {
 
   it.each([
     { credits: null, expected: null },
+    { credits: undefined, expected: null },
     {
       credits: { hasCredits: true, unlimited: true, balance: null },
       expected: ["Credits: Unlimited"],
     },
     {
+      credits: { hasCredits: false, unlimited: true, balance: "9007199254740993.0001" },
+      expected: ["Credits: Unlimited (balance: 9007199254740993.0001)"],
+    },
+    {
+      credits: { hasCredits: true, unlimited: true, balance: "0" },
+      expected: ["Credits: Unlimited (balance: 0)"],
+    },
+    {
       credits: { hasCredits: false, unlimited: false, balance: "0" },
-      expected: ["Credits: None available", "Credit balance: 0"],
+      expected: ["Credits: 0 available"],
+    },
+    {
+      credits: { hasCredits: false, unlimited: false, balance: "000.000" },
+      expected: ["Credits: 000.000 available"],
+    },
+    {
+      credits: { hasCredits: true, unlimited: false, balance: "0.00" },
+      expected: ["Credits: 0.00 available"],
     },
     {
       credits: { hasCredits: true, unlimited: false, balance: null },
       expected: ["Credits: Available (balance not reported)"],
     },
     {
+      credits: { hasCredits: true, unlimited: false },
+      expected: ["Credits: Available (balance not reported)"],
+    },
+    {
+      credits: { hasCredits: true, unlimited: false, balance: "  " },
+      expected: ["Credits: Available (balance not reported)"],
+    },
+    {
+      credits: { hasCredits: false, unlimited: false, balance: null },
+      expected: ["Credits: None available"],
+    },
+    {
+      credits: { hasCredits: false, unlimited: false },
+      expected: ["Credits: None available"],
+    },
+    {
+      credits: { hasCredits: false, unlimited: false, balance: "  " },
+      expected: ["Credits: None available"],
+    },
+    {
       credits: { hasCredits: true, unlimited: false, balance: "9007199254740993.0001" },
-      expected: ["Credits: Available", "Credit balance: 9007199254740993.0001"],
+      expected: ["Credits: 9007199254740993.0001 available"],
+    },
+    {
+      credits: { hasCredits: false, unlimited: false, balance: "9.99" },
+      expected: ["Credits: None available (balance: 9.99)"],
+    },
+    {
+      credits: { hasCredits: false, unlimited: false, balance: `0.${"0".repeat(400)}1` },
+      expected: [`Credits: None available (balance: 0.${"0".repeat(400)}1)`],
+    },
+    {
+      credits: { hasCredits: false, unlimited: false, balance: "0e-9999" },
+      expected: ["Credits: None available (balance: 0e-9999)"],
+    },
+    {
+      credits: { hasCredits: false, unlimited: false, balance: "unknown" },
+      expected: ["Credits: None available (balance: unknown)"],
+    },
+    {
+      credits: { hasCredits: true, unlimited: false, balance: "Infinity" },
+      expected: ["Credits: Available (balance: Infinity)"],
+    },
+    {
+      credits: { hasCredits: true, unlimited: false, balance: "NaN" },
+      expected: ["Credits: Available (balance: NaN)"],
     },
   ])(
     "preserves credits-only availability, nulls and decimal balances: $credits",
     ({ credits, expected }) => {
       const summary = formatCodexRateLimitSummary({
         checkedAt: "2026-09-29T00:00:00.000Z",
-        rateLimits: { credits },
+        rateLimits: credits === undefined ? {} : { credits },
       });
       expect(summary ? summary.details.map((line) => line.text) : null).toEqual(expected);
+      expect(summary?.details.some((line) => line.label === "Credit balance") ?? false).toBe(false);
     },
   );
+
+  it("uses the same single credit line in shared presentation and inline summaries", () => {
+    const input = {
+      checkedAt: "2026-09-29T00:00:00.000Z",
+      rateLimits: {
+        limitId: "codex",
+        credits: { hasCredits: true, unlimited: false, balance: "10000000000000000.00001" },
+      },
+    };
+    const text = "Credits: 10000000000000000.00001 available";
+    expect(formatCodexRateLimitPresentation(input)?.buckets[0]?.details).toEqual([
+      { label: "Credits", value: "10000000000000000.00001 available", text },
+    ]);
+    expect(formatCodexRateLimitInlineText(input)).toBe(text);
+  });
 
   it("shows individual spend amounts, zero remaining and provider-classified exhaustion", () => {
     const summary = formatCodexRateLimitSummary(

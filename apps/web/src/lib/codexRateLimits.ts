@@ -207,6 +207,25 @@ export function selectCodexAvailableResetCount(
   return availableCount;
 }
 
+function formatCreditValue(
+  credits: NonNullable<ServerProviderAccountRateLimitSnapshot["credits"]>,
+): string {
+  const balance = credits.balance?.trim();
+  if (credits.unlimited) return balance ? `Unlimited (balance: ${balance})` : "Unlimited";
+  if (!balance) return credits.hasCredits ? "Available (balance not reported)" : "None available";
+
+  // Amounts are provider decimal strings, not floating-point numbers or
+  // currency. Validate only their spelling, preserving every reported digit.
+  // In particular, Number() could round a tiny nonzero balance to zero and
+  // accidentally override a contradictory hasCredits=false status. A genuine
+  // decimal zero is safe to describe as zero available; all other balances
+  // still require the provider's availability flag.
+  const decimal = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/u.test(balance);
+  const zero = /^[+-]?(?:0+(?:\.0*)?|\.0+)$/u.test(balance);
+  if ((credits.hasCredits && decimal) || zero) return `${balance} available`;
+  return `${credits.hasCredits ? "Available" : "None available"} (balance: ${balance})`;
+}
+
 function formatSnapshot(
   snapshot: ServerProviderAccountRateLimitSnapshot,
   options: FormatOptions,
@@ -238,20 +257,7 @@ function formatSnapshot(
     details.push({ label, value, text: `${label}: ${value}` });
   const credits = snapshot.credits;
   if (credits) {
-    const balance = credits.balance?.trim();
-    append(
-      "Credits",
-      credits.unlimited
-        ? "Unlimited"
-        : credits.hasCredits
-          ? balance
-            ? "Available"
-            : "Available (balance not reported)"
-          : "None available",
-    );
-    // Balances and spend amounts are provider decimal strings, not JavaScript
-    // numbers. Preserve zero and precision; do not infer a currency or dollars.
-    if (balance) append("Credit balance", balance);
+    append("Credits", formatCreditValue(credits));
   }
   const individual = snapshot.individualLimit;
   if (individual) {

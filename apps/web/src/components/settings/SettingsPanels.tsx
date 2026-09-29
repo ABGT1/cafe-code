@@ -1922,7 +1922,7 @@ export function ProviderSettingsPanel() {
   };
 
   return (
-    <SettingsPageContainer>
+    <SettingsPageContainer className="max-w-6xl">
       <SettingsSection
         title="Providers"
         headerAction={

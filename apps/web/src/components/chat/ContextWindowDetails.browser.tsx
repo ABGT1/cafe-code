@@ -98,7 +98,10 @@ describe("ContextWindowDetails reset availability", () => {
       await expect.element(page.getByText(name, { exact: true })).toBeVisible();
       await expect.element(page.getByText("100% left", { exact: true })).toBeVisible();
       await expect.element(page.getByText("Credits: Unlimited", { exact: true })).toBeVisible();
-      await expect.element(page.getByText("Credit balance: 0", { exact: true })).toBeVisible();
+      await expect.element(page.getByText("Credits: 0 available", { exact: true })).toBeVisible();
+      await expect
+        .element(page.getByText("Credit balance:", { exact: false }))
+        .not.toBeInTheDocument();
       await expect.element(page.getByText("Individual spend limit: 0 used of 25.50")).toBeVisible();
       await expect
         .element(page.getByText(`Limit reached: ${reason}`, { exact: true }))
@@ -125,7 +128,7 @@ describe("ContextWindowDetails reset availability", () => {
       />,
     );
     await expect.element(page.getByText("Credits: Available (balance not reported)")).toBeVisible();
-    await expect.element(page.getByText("Credit balance: 0")).not.toBeInTheDocument();
+    await expect.element(page.getByText("Credits: 0 available")).not.toBeInTheDocument();
     await expect
       .element(page.getByText("Waiting for usage from this thread."))
       .not.toBeInTheDocument();

@@ -1790,7 +1790,10 @@ describe("settings panels", () => {
       .element(page.getByText("Usage limit resets available: 2", { exact: true }))
       .toBeInTheDocument();
     await expect.element(page.getByText("Additional quota", { exact: true })).toBeVisible();
-    await expect.element(page.getByText("Credit balance: 0", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Credits: 0 available", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText("Credit balance:", { exact: false }))
+      .not.toBeInTheDocument();
     await expect.element(page.getByText("Individual spend remaining: 0% left")).toBeVisible();
     await expect
       .element(page.getByText("Limit reached: Workspace member usage limit reached"))

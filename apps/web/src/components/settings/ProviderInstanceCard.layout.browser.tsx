@@ -1,0 +1,490 @@
+import "../../index.css";
+
+import {
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ProviderInstanceConfig,
+  type ServerProvider,
+  type ServerProviderAccountRateLimits,
+} from "@cafecode/contracts";
+import { page } from "vitest/browser";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { render } from "vitest-browser-react";
+
+import { applyInterfaceScalePercent } from "../../interfaceScale";
+import { TooltipProvider } from "../ui/tooltip";
+import { ProviderInstanceCard } from "./ProviderInstanceCard";
+import { DRIVER_OPTION_BY_VALUE } from "./providerDriverMeta";
+
+const api = vi.hoisted(() => ({
+  ensureLocalApi: vi.fn(() => {
+    throw new Error("Layout fixtures must not contact a provider or redeem usage resets");
+  }),
+}));
+vi.mock("../../localApi", () => ({ ensureLocalApi: api.ensureLocalApi }));
+
+const privateEmail = `${"private-account".repeat(10)}@example.invalid`;
+const creditBalance = "123456789012345678901234567890.0000001234";
+const longName = `Research ${"UnbrokenProviderName".repeat(10)}`;
+const checkedAt = "2026-09-29T00:00:00.000Z";
+const bucket = {
+  limitId: "codex",
+  primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: 1_800_000_000 },
+  secondary: { usedPercent: 60, windowDurationMins: 10_080, resetsAt: 1_800_500_000 },
+};
+
+function accountQuota(multiple: boolean, realistic: boolean): ServerProviderAccountRateLimits {
+  return {
+    checkedAt,
+    rateLimits: bucket,
+    ...(multiple
+      ? {
+          rateLimitsByLimitId: {
+            codex: bucket,
+            research: {
+              ...bucket,
+              limitId: "research",
+              limitName: "Research quota",
+              credits: {
+                hasCredits: true,
+                unlimited: false,
+                balance: realistic ? "120.000" : creditBalance,
+              },
+              ...(realistic ? { spendControlReached: false } : {}),
+            },
+            extended: {
+              ...bucket,
+              limitId: "extended",
+              limitName: "Extended quota",
+              credits: { hasCredits: true, unlimited: true, balance: null },
+            },
+          },
+        }
+      : {}),
+    rateLimitResetCredits: { availableCount: 0 },
+  };
+}
+
+function cardFixture(kind: "minimal" | "multiple" | "login", realistic: boolean) {
+  const displayName =
+    kind === "multiple"
+      ? realistic
+        ? "Research Codex"
+        : longName
+      : kind === "login"
+        ? "Login Codex"
+        : "Personal Codex";
+  const instanceId = ProviderInstanceId.make(
+    kind === "multiple" && !realistic
+      ? `codex-${"long-instance-id-".repeat(3)}account`
+      : `codex-${kind}`,
+  );
+  const instance: ProviderInstanceConfig = {
+    driver: ProviderDriverKind.make("codex"),
+    displayName,
+    enabled: true,
+    config: {},
+    environment: [],
+  };
+  const provider: ServerProvider = {
+    instanceId,
+    driver: instance.driver,
+    enabled: true,
+    installed: true,
+    version: "0.163.0",
+    status: "ready",
+    auth:
+      kind === "login"
+        ? { status: "unauthenticated" }
+        : {
+            status: "authenticated",
+            type: "chatgpt",
+            label: "ChatGPT Pro (Max) Subscription",
+            ...(kind === "multiple"
+              ? { email: realistic ? "researcher@example.invalid" : privateEmail }
+              : {}),
+          },
+    ...(kind === "multiple"
+      ? {
+          message: realistic
+            ? "Account ready"
+            : `Account detail: ${"unbroken-auth-detail".repeat(12)}`,
+        }
+      : {}),
+    ...(kind === "login"
+      ? {}
+      : { accountRateLimits: accountQuota(kind === "multiple", realistic) }),
+    checkedAt,
+    models: [],
+    slashCommands: [],
+    skills: [],
+  };
+  return {
+    kind,
+    displayName,
+    instanceId,
+    instance,
+    provider,
+    onSettingsOpenChange: vi.fn<(open: boolean) => void>(),
+    onSetDefaultProvider: vi.fn<(next: boolean) => void>(),
+    onUpdate: vi.fn<(next: ProviderInstanceConfig) => void>(),
+    onRestartRuntime: vi.fn<() => void>(),
+    onLogIn: vi.fn<() => void>(),
+    onDelete: vi.fn<() => void>(),
+  };
+}
+
+let mounted: Awaited<ReturnType<typeof render>> | undefined;
+let host: HTMLDivElement | undefined;
+
+afterEach(async () => {
+  await mounted?.unmount();
+  mounted = undefined;
+  host?.remove();
+  host = undefined;
+  applyInterfaceScalePercent(undefined);
+  expect(api.ensureLocalApi).not.toHaveBeenCalled();
+  api.ensureLocalApi.mockClear();
+});
+
+async function mountCards(
+  width: number,
+  scale: number,
+  realistic = false,
+  fixtures = [
+    cardFixture("minimal", realistic),
+    cardFixture("multiple", realistic),
+    cardFixture("login", realistic),
+  ],
+) {
+  // The middle width deliberately lives inside a large desktop viewport.
+  // A viewport breakpoint would miss narrow cards in a settings column.
+  await page.viewport(width === 520 ? 1200 : width, 1000);
+  applyInterfaceScalePercent(scale);
+  host = document.createElement("div");
+  host.style.width = `${width}px`;
+  document.body.append(host);
+  mounted = await render(
+    <TooltipProvider>
+      {fixtures.map((fixture) => (
+        <ProviderInstanceCard
+          key={fixture.instanceId}
+          instanceId={fixture.instanceId}
+          instance={fixture.instance}
+          driverOption={DRIVER_OPTION_BY_VALUE[fixture.instance.driver]}
+          liveProvider={fixture.provider}
+          isSettingsOpen={false}
+          onSettingsOpenChange={fixture.onSettingsOpenChange}
+          isDefaultProvider={fixture.kind !== "minimal"}
+          onSetDefaultProvider={fixture.onSetDefaultProvider}
+          onUpdate={fixture.onUpdate}
+          onRestartRuntime={fixture.kind === "minimal" ? undefined : fixture.onRestartRuntime}
+          onLogIn={fixture.kind === "login" ? fixture.onLogIn : undefined}
+          onDelete={fixture.kind === "multiple" ? fixture.onDelete : undefined}
+          hiddenModels={[]}
+          favoriteModels={[]}
+          modelOrder={[]}
+          onHiddenModelsChange={vi.fn()}
+          onFavoriteModelsChange={vi.fn()}
+          onModelOrderChange={vi.fn()}
+        />
+      ))}
+    </TooltipProvider>,
+    { container: host },
+  );
+  return { fixtures, host };
+}
+
+function expectNoHorizontalOverflow(element: HTMLElement) {
+  expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth + 1);
+}
+
+function expectControlsWithinHeader(card: HTMLElement, inline: boolean) {
+  const header = card.querySelector<HTMLElement>("[data-provider-card-header]")!;
+  const actions = card.querySelector<HTMLElement>("[data-provider-card-actions]")!;
+  const details = card.querySelector<HTMLElement>("[data-provider-card-details]")!;
+  const identity = header.firstElementChild!;
+  const headerBounds = header.getBoundingClientRect();
+  const actionsBounds = actions.getBoundingClientRect();
+  const detailsBounds = details.getBoundingClientRect();
+  const identityBounds = identity.getBoundingClientRect();
+
+  expect(header.contains(actions)).toBe(true);
+  expect(header.contains(details)).toBe(false);
+  expect(actionsBounds.right).toBeCloseTo(headerBounds.right, 0);
+  expect(actionsBounds.bottom).toBeLessThanOrEqual(headerBounds.bottom + 1);
+  expect(detailsBounds.top).toBeGreaterThanOrEqual(headerBounds.bottom);
+  expect(detailsBounds.left).toBeCloseTo(headerBounds.left, 0);
+  expect(detailsBounds.right).toBeCloseTo(headerBounds.right, 0);
+  if (inline) {
+    expect(actionsBounds.top).toBeCloseTo(headerBounds.top, 0);
+    expect(identityBounds.right).toBeLessThanOrEqual(actionsBounds.left + 1);
+  } else {
+    expect(actionsBounds.top).toBeGreaterThanOrEqual(identityBounds.bottom);
+  }
+
+  const controls = Array.from(actions.querySelectorAll<HTMLElement>("button, [role='switch']"));
+  expect(controls.length).toBeGreaterThanOrEqual(3);
+  for (const [index, control] of controls.entries()) {
+    const bounds = control.getBoundingClientRect();
+    expect(bounds.width).toBeGreaterThan(0);
+    expect(bounds.height).toBeGreaterThan(0);
+    expect(bounds.left).toBeGreaterThanOrEqual(headerBounds.left - 1);
+    expect(bounds.right).toBeLessThanOrEqual(headerBounds.right + 1);
+    expect(bounds.top).toBeGreaterThanOrEqual(headerBounds.top - 1);
+    expect(bounds.bottom).toBeLessThanOrEqual(headerBounds.bottom + 1);
+    for (const sibling of controls.slice(index + 1)) {
+      const other = sibling.getBoundingClientRect();
+      const horizontalIntersection =
+        Math.min(bounds.right, other.right) - Math.max(bounds.left, other.left);
+      const verticalIntersection =
+        Math.min(bounds.bottom, other.bottom) - Math.max(bounds.top, other.top);
+      expect(horizontalIntersection <= 1 || verticalIntersection <= 1).toBe(true);
+    }
+  }
+  // A wrapped actions row must also stay right-aligned, not fall back to the
+  // old left-aligned mobile layout when optional controls increase its width.
+  expect(controls.at(-1)!.getBoundingClientRect().right).toBeCloseTo(headerBounds.right, 0);
+  for (const element of [card, header, actions, details]) expectNoHorizontalOverflow(element);
+}
+
+describe("Provider instance card layout", () => {
+  it.each([320, 520, 760].flatMap((width) => [80, 100, 130].map((scale) => ({ width, scale }))))(
+    "keeps header actions and quota columns aligned at $width px / $scale% scale",
+    async ({ width, scale }) => {
+      const { fixtures, host } = await mountCards(width, scale);
+      const cards = Array.from(host.querySelectorAll<HTMLElement>("[data-provider-card]"));
+      expect(cards).toHaveLength(3);
+      const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+      const percentRights: number[] = [];
+
+      for (const [index, card] of cards.entries()) {
+        expectControlsWithinHeader(card, card.clientWidth >= 32 * rem);
+        const details = card.querySelector<HTMLElement>("[data-provider-card-details]")!;
+        const detailsBounds = details.getBoundingClientRect();
+        const quota = card.querySelector<HTMLElement>("[data-account-quota]");
+        const quotaScroll = card.querySelector<HTMLElement>("[data-account-quota-scroll]");
+        if (quota) {
+          const bounds = quota.getBoundingClientRect();
+          expect(quota.dataset.accountQuotaLayout).toBe("settings");
+          expect(bounds.left).toBeCloseTo(detailsBounds.left, 0);
+          expect(bounds.width).toBeCloseTo(detailsBounds.width, 0);
+        }
+        const percentages = Array.from(
+          card.querySelectorAll<HTMLElement>("[data-account-quota-bucket] span"),
+        ).filter((span) => /^\d+(?:\.\d+)?% left$/.test(span.textContent ?? ""));
+        expect(percentages).toHaveLength(index === 0 ? 2 : index === 1 ? 6 : 0);
+        for (const value of percentages) {
+          const bounds = value.getBoundingClientRect();
+          const quotaWindow = value.closest<HTMLElement>("[data-account-quota-window]")!;
+          const windowColumn = quotaWindow.firstElementChild!.getBoundingClientRect();
+          const reset = quotaWindow.querySelector("p")!.getBoundingClientRect();
+          // Wide settings cards share the row with a separate reset column.
+          // Percentage alignment belongs to the label/value column; neither
+          // optional header actions nor the reset text determine that edge.
+          expect(bounds.right).toBeCloseTo(windowColumn.right, 0);
+          if (quota!.clientWidth >= 40 * rem) {
+            expect(reset.top).toBeCloseTo(windowColumn.top, 0);
+            expect(reset.left).toBeGreaterThanOrEqual(windowColumn.right);
+          } else {
+            expect(reset.top).toBeGreaterThanOrEqual(windowColumn.bottom - 1);
+          }
+          percentRights.push(bounds.right);
+        }
+        for (const quota of card.querySelectorAll<HTMLElement>(
+          "[data-account-quota], [data-account-quota-scroll]",
+        ))
+          expectNoHorizontalOverflow(quota);
+        if (quotaScroll) {
+          expect(getComputedStyle(quotaScroll).scrollbarGutter).toBe("stable");
+          const resetCount = Array.from(details.querySelectorAll("p")).find(
+            (element) => element.textContent === "Usage limit resets available: 0",
+          )!;
+          expect(resetCount).toBeDefined();
+          expect(quotaScroll.contains(resetCount)).toBe(false);
+          expect(resetCount.getBoundingClientRect().top).toBeGreaterThanOrEqual(
+            quotaScroll.getBoundingClientRect().bottom - 1,
+          );
+        }
+        expect(card.textContent).not.toContain(privateEmail);
+        expect(card.innerHTML).not.toContain(privateEmail);
+        expect(fixtures[index]!.onUpdate).not.toHaveBeenCalled();
+      }
+
+      expect(Math.max(...percentRights) - Math.min(...percentRights)).toBeLessThanOrEqual(1);
+      expectNoHorizontalOverflow(host);
+      expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
+      await expect
+        .element(page.getByRole("button", { name: "Toggle account email visibility" }))
+        .toBeVisible();
+      await expect.element(page.getByText(privateEmail, { exact: true })).not.toBeInTheDocument();
+      await expect
+        .element(page.getByText(`Credits: ${creditBalance} available`, { exact: true }))
+        .toBeVisible();
+      expect(host.textContent).not.toContain("Credit balance:");
+    },
+  );
+
+  it("uses the available desktop width for single-line identity, authentication and quota rows", async () => {
+    const { fixtures, host } = await mountCards(1152, 100, true);
+    const cards = Array.from(host.querySelectorAll<HTMLElement>("[data-provider-card]"));
+    const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+    const percentageRights: number[] = [];
+    for (const [index, card] of cards.entries()) {
+      expectControlsWithinHeader(card, true);
+      const header = card.querySelector<HTMLElement>("[data-provider-card-header]")!;
+      const actions = card.querySelector<HTMLElement>("[data-provider-card-actions]")!;
+      const title = header.querySelector("h3")!;
+      const headerBounds = header.getBoundingClientRect();
+      const actionsBounds = actions.getBoundingClientRect();
+      const titleBounds = title.getBoundingClientRect();
+      expect(titleBounds.top).toBeGreaterThanOrEqual(actionsBounds.top - 1);
+      expect(titleBounds.bottom).toBeLessThanOrEqual(actionsBounds.bottom + 1);
+      expect(headerBounds.height).toBeLessThanOrEqual(1.75 * rem + 1);
+      const details = card.querySelector<HTMLElement>("[data-provider-card-details]")!;
+      const auth = details.firstElementChild!;
+      expect(auth.getBoundingClientRect().height).toBeLessThanOrEqual(
+        Number.parseFloat(getComputedStyle(auth).lineHeight) + 1,
+      );
+      const quota = card.querySelector<HTMLElement>("[data-account-quota]");
+      if (!quota) continue;
+      expect(quota.dataset.accountQuotaLayout).toBe("settings");
+      expect(quota.getBoundingClientRect().width).toBeCloseTo(
+        details.getBoundingClientRect().width,
+        0,
+      );
+      const windows = quota.querySelectorAll<HTMLElement>("[data-account-quota-window]");
+      expect(windows).toHaveLength(index === 0 ? 2 : 6);
+      for (const quotaWindow of windows) {
+        const label = quotaWindow.querySelector("span")!;
+        const value = Array.from(quotaWindow.querySelectorAll("span")).find((span) =>
+          /^\d+(?:\.\d+)?% left$/.test(span.textContent ?? ""),
+        )!;
+        const reset = quotaWindow.querySelector("p")!;
+        const labelBounds = label.getBoundingClientRect();
+        const valueBounds = value.getBoundingClientRect();
+        const resetBounds = reset.getBoundingClientRect();
+        expect(labelBounds.top).toBeCloseTo(valueBounds.top, 0);
+        expect(labelBounds.top).toBeCloseTo(resetBounds.top, 0);
+        expect(resetBounds.left).toBeGreaterThan(valueBounds.right);
+        expect(resetBounds.width).toBeGreaterThan(24 * rem);
+        for (const text of [label, value, reset]) {
+          expect(text.getBoundingClientRect().height).toBeLessThanOrEqual(
+            Number.parseFloat(getComputedStyle(text).lineHeight) + 1,
+          );
+        }
+        percentageRights.push(valueBounds.right);
+      }
+      expectNoHorizontalOverflow(quota);
+      expect(fixtures[index]!.onUpdate).not.toHaveBeenCalled();
+    }
+    expect(Math.max(...percentageRights) - Math.min(...percentageRights)).toBeLessThanOrEqual(1);
+    const credits = page.getByText("Credits: 120.000 available", { exact: true }).element();
+    const spendControl = page.getByText("Spend control: Not reached", { exact: true }).element();
+    expect(credits.getBoundingClientRect().top).toBeCloseTo(
+      spendControl.getBoundingClientRect().top,
+      0,
+    );
+    expect(spendControl.getBoundingClientRect().left).toBeGreaterThan(
+      credits.getBoundingClientRect().right,
+    );
+    await expect
+      .element(page.getByText("researcher@example.invalid", { exact: true }))
+      .not.toBeInTheDocument();
+    expectNoHorizontalOverflow(host);
+  });
+
+  it.each([320, 1152])(
+    "keeps reset-only windows full-width without inventing utilization at %s px",
+    async (width) => {
+      const fixture = cardFixture("minimal", true);
+      const resetOnlyFixture = {
+        ...fixture,
+        provider: {
+          ...fixture.provider,
+          accountRateLimits: {
+            checkedAt,
+            rateLimits: {
+              primary: { windowDurationMins: 300, resetsAt: 1_800_000_000 },
+              secondary: { usedPercent: null, windowDurationMins: 10_080, resetsAt: 1_800_500_000 },
+            },
+            rateLimitResetCredits: { availableCount: 0 },
+          },
+        },
+      };
+      const { host } = await mountCards(width, 100, true, [resetOnlyFixture]);
+      const quota = host.querySelector<HTMLElement>("[data-account-quota]")!;
+      expect(quota.dataset.accountQuotaLayout).toBe("settings");
+      const windows = quota.querySelectorAll<HTMLElement>("[data-account-quota-window]");
+      expect(windows).toHaveLength(2);
+      for (const [index, quotaWindow] of Array.from(windows).entries()) {
+        const reset = quotaWindow.querySelector("p")!;
+        expect(reset.textContent).toMatch(index === 0 ? /^5h reset:/ : /^7d reset:/);
+        expect(quotaWindow.querySelector("span")).toBeNull();
+        expect(quotaWindow.textContent).not.toMatch(/% left/);
+        expect(reset.getBoundingClientRect().left).toBeCloseTo(
+          quotaWindow.getBoundingClientRect().left,
+          0,
+        );
+        expect(reset.getBoundingClientRect().right).toBeCloseTo(
+          quotaWindow.getBoundingClientRect().right,
+          0,
+        );
+        expectNoHorizontalOverflow(quotaWindow);
+      }
+      const resetCount = page
+        .getByText("Usage limit resets available: 0", { exact: true })
+        .element();
+      expect(quota.querySelector("[data-account-quota-scroll]")!.contains(resetCount)).toBe(false);
+      expect(fixture.onUpdate).not.toHaveBeenCalled();
+      expectNoHorizontalOverflow(host);
+    },
+  );
+
+  it("keeps wrapped controls interactive without provider I/O or exposing email by default", async () => {
+    const { fixtures, host } = await mountCards(320, 130);
+    const [minimal, multiple, login] = fixtures;
+    const emailToggle = page.getByRole("button", { name: "Toggle account email visibility" });
+    await expect.element(page.getByText(privateEmail, { exact: true })).not.toBeInTheDocument();
+    await emailToggle.click();
+    await expect.element(page.getByText(privateEmail, { exact: true })).toBeVisible();
+    for (const card of host.querySelectorAll<HTMLElement>("[data-provider-card]"))
+      expectControlsWithinHeader(card, false);
+    await emailToggle.click();
+    await expect.element(page.getByText(privateEmail, { exact: true })).not.toBeInTheDocument();
+
+    await page
+      .getByRole("button", { name: `Open ${minimal!.displayName} settings`, exact: true })
+      .click();
+    expect(minimal!.onSettingsOpenChange).toHaveBeenCalledExactlyOnceWith(true);
+    await page
+      .getByRole("button", { name: `Set ${minimal!.displayName} as default provider`, exact: true })
+      .click();
+    expect(minimal!.onSetDefaultProvider).toHaveBeenCalledExactlyOnceWith(true);
+    await page
+      .getByRole("button", {
+        name: `Clear ${multiple!.displayName} as default provider`,
+        exact: true,
+      })
+      .click();
+    expect(multiple!.onSetDefaultProvider).toHaveBeenCalledExactlyOnceWith(false);
+    await page
+      .getByRole("button", { name: `Restart ${multiple!.displayName} runtime`, exact: true })
+      .click();
+    expect(multiple!.onRestartRuntime).toHaveBeenCalledOnce();
+    await page.getByRole("button", { name: "Log In", exact: true }).click();
+    expect(login!.onLogIn).toHaveBeenCalledOnce();
+    await page
+      .getByRole("button", {
+        name: `Delete provider instance ${multiple!.instanceId}`,
+        exact: true,
+      })
+      .click();
+    expect(multiple!.onDelete).toHaveBeenCalledOnce();
+    await page.getByRole("switch", { name: `Enable ${login!.displayName}`, exact: true }).click();
+    expect(login!.onUpdate).toHaveBeenCalledExactlyOnceWith({ ...login!.instance, enabled: false });
+    expect(minimal!.onUpdate).not.toHaveBeenCalled();
+    expect(multiple!.onUpdate).not.toHaveBeenCalled();
+    expect(api.ensureLocalApi).not.toHaveBeenCalled();
+  });
+});
