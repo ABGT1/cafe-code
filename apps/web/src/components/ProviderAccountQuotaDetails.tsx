@@ -35,7 +35,6 @@ export function ProviderAccountQuotaDetails(props: {
       className={cn(
         "flex min-h-0 min-w-0 flex-col gap-1.5 text-xs leading-snug text-muted-foreground/80 [overflow-wrap:anywhere]",
         layout === "popover" && "max-w-[min(28rem,calc(100vw-2rem))]",
-        layout === "settings" && "@container/account-quota",
       )}
       data-account-quota
       data-account-quota-layout={layout}
@@ -72,12 +71,12 @@ export function ProviderAccountQuotaDetails(props: {
                     key={kind}
                     className={cn(
                       "min-w-0",
-                      // Settings has a full-width card, unlike the composer
-                      // popover/rail. Use its own available width to keep a
-                      // window's percentage and reset schedule on one row;
-                      // only genuinely narrow cards stack the timestamp.
+                      // These are one window's related facts, not columns
+                      // distributed across the whole card. Size them to their
+                      // content and wrap when they no longer fit, so wider
+                      // settings pages do not detach usage from its label.
                       layout === "settings"
-                        ? "grid items-baseline gap-x-6 gap-y-1 @min-[40rem]/account-quota:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]"
+                        ? "flex flex-wrap items-baseline gap-x-4 gap-y-1"
                         : "space-y-1",
                     )}
                     data-account-quota-window={kind}
@@ -98,16 +97,33 @@ export function ProviderAccountQuotaDetails(props: {
                           </div>
                         </>
                       ) : (
-                        <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3">
+                        <div
+                          className={
+                            layout === "settings"
+                              ? "flex min-w-0 max-w-full flex-wrap items-baseline gap-x-3 gap-y-1"
+                              : "grid grid-cols-[minmax(0,1fr)_auto] gap-x-3"
+                          }
+                        >
                           <span>{window.label}</span>
-                          <span className="text-right font-medium text-foreground">
+                          <span
+                            className={cn(
+                              "text-right font-medium text-foreground",
+                              layout === "settings" && "shrink-0 whitespace-nowrap",
+                            )}
+                          >
                             {window.value}
                           </span>
                         </div>
                       )
                     ) : null}
                     {reset ? (
-                      <p className={layout === "settings" && !window ? "col-span-full" : undefined}>
+                      <p
+                        className={
+                          layout === "settings"
+                            ? cn("min-w-0 max-w-full", !window && "w-full")
+                            : undefined
+                        }
+                      >
                         {reset}
                       </p>
                     ) : null}
@@ -115,7 +131,7 @@ export function ProviderAccountQuotaDetails(props: {
                 );
               })}
               {layout === "settings" && bucket.details.length > 0 ? (
-                // Keep exact provider values, but do not make every credit or
+                // Keep provider details together, without making every credit or
                 // spend-status field consume a full row on a wide desktop.
                 <div className="flex min-w-0 flex-wrap gap-x-5 gap-y-1" data-account-quota-metadata>
                   {bucket.details.map((line) => (

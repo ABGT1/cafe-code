@@ -207,23 +207,51 @@ export function selectCodexAvailableResetCount(
   return availableCount;
 }
 
+/** Round display-only decimal metadata without converting it to a Number.
+ * Arbitrarily large integers and tiny fractions must retain their exact value
+ * until rounding to hundredths. Increment the unsigned magnitude at a half,
+ * then restore a negative sign only for nonzero output (half away from zero).
+ * A nondecimal provider string remains opaque metadata, not a numeric amount. */
+function formatCreditBalance(balance: string): string | null {
+  const decimal = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))$/u.exec(balance);
+  if (!decimal) return null;
+  const integer = (decimal[2] ?? "0").replace(/^0+(?=\d)/u, "");
+  const fraction = decimal[3] ?? decimal[4] ?? "";
+  const hundredths = [...`${integer}${fraction.slice(0, 2).padEnd(2, "0")}`];
+  if (fraction.length > 2 && fraction[2]! >= "5") {
+    let index = hundredths.length - 1;
+    while (index >= 0 && hundredths[index] === "9") {
+      hundredths[index] = "0";
+      index -= 1;
+    }
+    if (index < 0) hundredths.unshift("1");
+    else hundredths[index] = String.fromCharCode(hundredths[index]!.charCodeAt(0) + 1);
+  }
+  const digits = hundredths.join("");
+  const whole = digits.slice(0, -2);
+  const remainder = digits.slice(-2).replace(/0+$/u, "");
+  const sign = decimal[1] === "-" && (whole !== "0" || remainder !== "") ? "-" : "";
+  return `${sign}${whole}${remainder ? `.${remainder}` : ""}`;
+}
+
 function formatCreditValue(
   credits: NonNullable<ServerProviderAccountRateLimitSnapshot["credits"]>,
 ): string {
   const balance = credits.balance?.trim();
-  if (credits.unlimited) return balance ? `Unlimited (balance: ${balance})` : "Unlimited";
+  const rounded = balance ? formatCreditBalance(balance) : null;
+  const displayBalance = rounded ?? balance;
+  if (credits.unlimited)
+    return displayBalance ? `Unlimited (balance: ${displayBalance})` : "Unlimited";
   if (!balance) return credits.hasCredits ? "Available (balance not reported)" : "None available";
 
   // Amounts are provider decimal strings, not floating-point numbers or
-  // currency. Validate only their spelling, preserving every reported digit.
-  // In particular, Number() could round a tiny nonzero balance to zero and
-  // accidentally override a contradictory hasCredits=false status. A genuine
-  // decimal zero is safe to describe as zero available; all other balances
-  // still require the provider's availability flag.
-  const decimal = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/u.test(balance);
+  // currency. Availability uses the original unrounded value, never its
+  // display projection: a tiny nonzero amount that rounds to zero must not
+  // override hasCredits=false. A genuinely reported decimal zero is safe to
+  // describe as zero available; all other amounts require the provider flag.
   const zero = /^[+-]?(?:0+(?:\.0*)?|\.0+)$/u.test(balance);
-  if ((credits.hasCredits && decimal) || zero) return `${balance} available`;
-  return `${credits.hasCredits ? "Available" : "None available"} (balance: ${balance})`;
+  if ((credits.hasCredits && rounded !== null) || zero) return `${displayBalance} available`;
+  return `${credits.hasCredits ? "Available" : "None available"} (balance: ${displayBalance})`;
 }
 
 function formatSnapshot(

@@ -1183,9 +1183,9 @@ export function ProviderInstanceCard({
             />
           </div>
         </div>
-        {/* All accounts share readable label/value columns regardless of how
-            many controls their header exposes. Reserve the quota scrollbar's
-            gutter so long bucket lists cannot shift the percentage column. */}
+        {/* Details use the whole card independently of its header controls.
+            Reserve the quota scrollbar's gutter so longer bucket lists do
+            not change the available width and unexpectedly rewrap rows. */}
         <div className="mt-2 min-w-0 space-y-2" data-provider-card-details>
           {authRowNode}
           {accountQuota ? (

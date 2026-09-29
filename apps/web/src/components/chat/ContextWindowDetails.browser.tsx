@@ -140,4 +140,26 @@ describe("ContextWindowDetails reset availability", () => {
     );
     await expect.element(page.getByText("Waiting for usage from this thread.")).toBeVisible();
   });
+
+  it.each(["popover", "panel"] as const)(
+    "rounds displayed credits in the %s without changing the provider snapshot",
+    async (layout) => {
+      const snapshot: ServerProviderAccountRateLimits = {
+        ...rateLimits,
+        rateLimits: {
+          credits: { hasCredits: true, unlimited: false, balance: "545.0317780000" },
+        },
+      };
+      mounted = await render(
+        <ContextWindowDetails usage={null} rateLimits={snapshot} layout={layout} />,
+      );
+      await expect
+        .element(page.getByText("Credits: 545.03 available", { exact: true }))
+        .toBeVisible();
+      await expect
+        .element(page.getByText("545.0317780000", { exact: false }))
+        .not.toBeInTheDocument();
+      expect(snapshot.rateLimits.credits?.balance).toBe("545.0317780000");
+    },
+  );
 });

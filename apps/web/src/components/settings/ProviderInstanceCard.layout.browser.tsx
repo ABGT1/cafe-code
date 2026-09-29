@@ -199,6 +199,75 @@ function expectNoHorizontalOverflow(element: HTMLElement) {
   expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth + 1);
 }
 
+function unwrappedTextWidth(element: HTMLElement) {
+  // Measure the same synthetic text/font without wrapping. Deriving the fit
+  // from the rendered row alone would let a stretched half-card column hide
+  // the regression: its extra whitespace would falsely look like text width.
+  const sample = element.cloneNode(true) as HTMLElement;
+  const style = getComputedStyle(element);
+  Object.assign(sample.style, {
+    position: "fixed",
+    visibility: "hidden",
+    display: "inline-block",
+    width: "max-content",
+    maxWidth: "none",
+    whiteSpace: "nowrap",
+    font: style.font,
+    letterSpacing: style.letterSpacing,
+  });
+  document.body.append(sample);
+  try {
+    return sample.getBoundingClientRect().width;
+  } finally {
+    sample.remove();
+  }
+}
+
+function expectContentSizedQuotaWindow(quotaWindow: HTMLElement) {
+  const pair = quotaWindow.firstElementChild as HTMLElement;
+  const label = pair.querySelector("span")!;
+  const value = Array.from(pair.querySelectorAll("span")).find((span) =>
+    /^\d+(?:\.\d+)?% left$/.test(span.textContent ?? ""),
+  )!;
+  const reset = quotaWindow.querySelector("p")!;
+  const bounds = quotaWindow.getBoundingClientRect();
+  const pairBounds = pair.getBoundingClientRect();
+  const labelBounds = label.getBoundingClientRect();
+  const valueBounds = value.getBoundingClientRect();
+  const resetBounds = reset.getBoundingClientRect();
+  const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+  const pairGap = Number.parseFloat(getComputedStyle(pair).columnGap);
+  const resetGap = Number.parseFloat(getComputedStyle(quotaWindow).columnGap);
+  const naturalPairWidth = unwrappedTextWidth(label) + pairGap + unwrappedTextWidth(value);
+  const naturalResetWidth = unwrappedTextWidth(reset);
+  expect(pairBounds.width).toBeLessThanOrEqual(naturalPairWidth + 1);
+  expect(pairBounds.left).toBeCloseTo(bounds.left, 0);
+  if (naturalPairWidth <= bounds.width + 1) {
+    expect(valueBounds.top).toBeCloseTo(labelBounds.top, 0);
+    expect(valueBounds.left - labelBounds.right).toBeGreaterThanOrEqual(0);
+    expect(valueBounds.left - labelBounds.right).toBeLessThanOrEqual(0.75 * rem + 1);
+  } else {
+    expect(valueBounds.top).toBeGreaterThanOrEqual(labelBounds.bottom - 1);
+    expect(valueBounds.left).toBeCloseTo(pairBounds.left, 0);
+  }
+  const fitsInline =
+    Math.min(naturalPairWidth, bounds.width) +
+      resetGap +
+      Math.min(naturalResetWidth, bounds.width) <=
+    bounds.width + 1;
+  if (fitsInline) {
+    expect(resetBounds.top).toBeCloseTo(pairBounds.top, 0);
+    expect(resetBounds.left - pairBounds.right).toBeGreaterThanOrEqual(0);
+    expect(resetBounds.left - pairBounds.right).toBeLessThanOrEqual(rem + 1);
+  } else {
+    expect(resetBounds.top).toBeGreaterThanOrEqual(pairBounds.bottom - 1);
+    expect(resetBounds.left).toBeCloseTo(bounds.left, 0);
+  }
+  expect(resetBounds.width).toBeLessThanOrEqual(naturalResetWidth + 1);
+  expectNoHorizontalOverflow(quotaWindow);
+  return { label: label.textContent!, valueRight: valueBounds.right, fitsInline };
+}
+
 function expectControlsWithinHeader(card: HTMLElement, inline: boolean) {
   const header = card.querySelector<HTMLElement>("[data-provider-card-header]")!;
   const actions = card.querySelector<HTMLElement>("[data-provider-card-actions]")!;
@@ -250,13 +319,13 @@ function expectControlsWithinHeader(card: HTMLElement, inline: boolean) {
 
 describe("Provider instance card layout", () => {
   it.each([320, 520, 760].flatMap((width) => [80, 100, 130].map((scale) => ({ width, scale }))))(
-    "keeps header actions and quota columns aligned at $width px / $scale% scale",
+    "keeps header actions aligned and quota facts naturally spaced at $width px / $scale% scale",
     async ({ width, scale }) => {
       const { fixtures, host } = await mountCards(width, scale);
       const cards = Array.from(host.querySelectorAll<HTMLElement>("[data-provider-card]"));
       expect(cards).toHaveLength(3);
       const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
-      const percentRights: number[] = [];
+      const percentRights = new Map<string, number[]>();
 
       for (const [index, card] of cards.entries()) {
         expectControlsWithinHeader(card, card.clientWidth >= 32 * rem);
@@ -275,21 +344,12 @@ describe("Provider instance card layout", () => {
         ).filter((span) => /^\d+(?:\.\d+)?% left$/.test(span.textContent ?? ""));
         expect(percentages).toHaveLength(index === 0 ? 2 : index === 1 ? 6 : 0);
         for (const value of percentages) {
-          const bounds = value.getBoundingClientRect();
           const quotaWindow = value.closest<HTMLElement>("[data-account-quota-window]")!;
-          const windowColumn = quotaWindow.firstElementChild!.getBoundingClientRect();
-          const reset = quotaWindow.querySelector("p")!.getBoundingClientRect();
-          // Wide settings cards share the row with a separate reset column.
-          // Percentage alignment belongs to the label/value column; neither
-          // optional header actions nor the reset text determine that edge.
-          expect(bounds.right).toBeCloseTo(windowColumn.right, 0);
-          if (quota!.clientWidth >= 40 * rem) {
-            expect(reset.top).toBeCloseTo(windowColumn.top, 0);
-            expect(reset.left).toBeGreaterThanOrEqual(windowColumn.right);
-          } else {
-            expect(reset.top).toBeGreaterThanOrEqual(windowColumn.bottom - 1);
-          }
-          percentRights.push(bounds.right);
+          const row = expectContentSizedQuotaWindow(quotaWindow);
+          // Equal labels stay aligned between accounts with different header
+          // actions. Different label lengths deliberately do not create a
+          // shared percentage column halfway across the settings card.
+          percentRights.set(row.label, [...(percentRights.get(row.label) ?? []), row.valueRight]);
         }
         for (const quota of card.querySelectorAll<HTMLElement>(
           "[data-account-quota], [data-account-quota-scroll]",
@@ -311,7 +371,8 @@ describe("Provider instance card layout", () => {
         expect(fixtures[index]!.onUpdate).not.toHaveBeenCalled();
       }
 
-      expect(Math.max(...percentRights) - Math.min(...percentRights)).toBeLessThanOrEqual(1);
+      for (const rights of percentRights.values())
+        expect(Math.max(...rights) - Math.min(...rights)).toBeLessThanOrEqual(1);
       expectNoHorizontalOverflow(host);
       expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
       await expect
@@ -319,7 +380,9 @@ describe("Provider instance card layout", () => {
         .toBeVisible();
       await expect.element(page.getByText(privateEmail, { exact: true })).not.toBeInTheDocument();
       await expect
-        .element(page.getByText(`Credits: ${creditBalance} available`, { exact: true }))
+        .element(
+          page.getByText("Credits: 123456789012345678901234567890 available", { exact: true }),
+        )
         .toBeVisible();
       expect(host.textContent).not.toContain("Credit balance:");
     },
@@ -329,7 +392,7 @@ describe("Provider instance card layout", () => {
     const { fixtures, host } = await mountCards(1152, 100, true);
     const cards = Array.from(host.querySelectorAll<HTMLElement>("[data-provider-card]"));
     const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
-    const percentageRights: number[] = [];
+    const percentageRights = new Map<string, number[]>();
     for (const [index, card] of cards.entries()) {
       expectControlsWithinHeader(card, true);
       const header = card.querySelector<HTMLElement>("[data-provider-card-header]")!;
@@ -356,6 +419,8 @@ describe("Provider instance card layout", () => {
       const windows = quota.querySelectorAll<HTMLElement>("[data-account-quota-window]");
       expect(windows).toHaveLength(index === 0 ? 2 : 6);
       for (const quotaWindow of windows) {
+        const row = expectContentSizedQuotaWindow(quotaWindow);
+        expect(row.fitsInline).toBe(true);
         const label = quotaWindow.querySelector("span")!;
         const value = Array.from(quotaWindow.querySelectorAll("span")).find((span) =>
           /^\d+(?:\.\d+)?% left$/.test(span.textContent ?? ""),
@@ -367,19 +432,22 @@ describe("Provider instance card layout", () => {
         expect(labelBounds.top).toBeCloseTo(valueBounds.top, 0);
         expect(labelBounds.top).toBeCloseTo(resetBounds.top, 0);
         expect(resetBounds.left).toBeGreaterThan(valueBounds.right);
-        expect(resetBounds.width).toBeGreaterThan(24 * rem);
         for (const text of [label, value, reset]) {
           expect(text.getBoundingClientRect().height).toBeLessThanOrEqual(
             Number.parseFloat(getComputedStyle(text).lineHeight) + 1,
           );
         }
-        percentageRights.push(valueBounds.right);
+        percentageRights.set(row.label, [
+          ...(percentageRights.get(row.label) ?? []),
+          row.valueRight,
+        ]);
       }
       expectNoHorizontalOverflow(quota);
       expect(fixtures[index]!.onUpdate).not.toHaveBeenCalled();
     }
-    expect(Math.max(...percentageRights) - Math.min(...percentageRights)).toBeLessThanOrEqual(1);
-    const credits = page.getByText("Credits: 120.000 available", { exact: true }).element();
+    for (const rights of percentageRights.values())
+      expect(Math.max(...rights) - Math.min(...rights)).toBeLessThanOrEqual(1);
+    const credits = page.getByText("Credits: 120 available", { exact: true }).element();
     const spendControl = page.getByText("Spend control: Not reached", { exact: true }).element();
     expect(credits.getBoundingClientRect().top).toBeCloseTo(
       spendControl.getBoundingClientRect().top,

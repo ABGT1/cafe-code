@@ -259,7 +259,7 @@ describe("codexRateLimits", () => {
     },
     {
       credits: { hasCredits: false, unlimited: true, balance: "9007199254740993.0001" },
-      expected: ["Credits: Unlimited (balance: 9007199254740993.0001)"],
+      expected: ["Credits: Unlimited (balance: 9007199254740993)"],
     },
     {
       credits: { hasCredits: true, unlimited: true, balance: "0" },
@@ -271,11 +271,11 @@ describe("codexRateLimits", () => {
     },
     {
       credits: { hasCredits: false, unlimited: false, balance: "000.000" },
-      expected: ["Credits: 000.000 available"],
+      expected: ["Credits: 0 available"],
     },
     {
       credits: { hasCredits: true, unlimited: false, balance: "0.00" },
-      expected: ["Credits: 0.00 available"],
+      expected: ["Credits: 0 available"],
     },
     {
       credits: { hasCredits: true, unlimited: false, balance: null },
@@ -303,7 +303,7 @@ describe("codexRateLimits", () => {
     },
     {
       credits: { hasCredits: true, unlimited: false, balance: "9007199254740993.0001" },
-      expected: ["Credits: 9007199254740993.0001 available"],
+      expected: ["Credits: 9007199254740993 available"],
     },
     {
       credits: { hasCredits: false, unlimited: false, balance: "9.99" },
@@ -311,7 +311,7 @@ describe("codexRateLimits", () => {
     },
     {
       credits: { hasCredits: false, unlimited: false, balance: `0.${"0".repeat(400)}1` },
-      expected: [`Credits: None available (balance: 0.${"0".repeat(400)}1)`],
+      expected: ["Credits: None available (balance: 0)"],
     },
     {
       credits: { hasCredits: false, unlimited: false, balance: "0e-9999" },
@@ -349,12 +349,88 @@ describe("codexRateLimits", () => {
         credits: { hasCredits: true, unlimited: false, balance: "10000000000000000.00001" },
       },
     };
-    const text = "Credits: 10000000000000000.00001 available";
+    const text = "Credits: 10000000000000000 available";
     expect(formatCodexRateLimitPresentation(input)?.buckets[0]?.details).toEqual([
-      { label: "Credits", value: "10000000000000000.00001 available", text },
+      { label: "Credits", value: "10000000000000000 available", text },
     ]);
     expect(formatCodexRateLimitInlineText(input)).toBe(text);
   });
+
+  it.each([
+    ["0", "0"],
+    ["-0.000", "0"],
+    ["+000.00", "0"],
+    ["120.000", "120"],
+    ["545.0317780000", "545.03"],
+    ["1.200", "1.2"],
+    ["1.00499999999999999999", "1"],
+    ["1.005", "1.01"],
+    ["-1.005", "-1.01"],
+    ["-1.00499999999999999999", "-1"],
+    ["9.999", "10"],
+    ["-9.995", "-10"],
+    [".005", "0.01"],
+    ["-.005", "-0.01"],
+    [".004", "0"],
+    ["-.004", "0"],
+    ["+0009.995", "10"],
+    ["120.", "120"],
+    ["9007199254740993.995", "9007199254740994"],
+    ["123456789012345678901234567890.0000001234", "123456789012345678901234567890"],
+    ["999999999999999999999999999999.995", "1000000000000000000000000000000"],
+    [`0.${"0".repeat(400)}1`, "0"],
+  ])("rounds only the displayed balance %s to %s", (balance, expected) => {
+    const credits = Object.freeze({ hasCredits: true, unlimited: false, balance });
+    const input = Object.freeze({
+      checkedAt: "2026-09-30T00:00:00.000Z",
+      rateLimits: Object.freeze({ limitId: "codex", credits }),
+    });
+    expect(formatCodexRateLimitSummary(input)?.details.map((line) => line.text)).toEqual([
+      `Credits: ${expected} available`,
+    ]);
+    expect(input.rateLimits.credits.balance).toBe(balance);
+    expect(input.rateLimits.credits.hasCredits).toBe(true);
+    expect(input.rateLimits.credits.unlimited).toBe(false);
+  });
+
+  it.each([
+    {
+      credits: { hasCredits: false, unlimited: false, balance: "0.000001" },
+      expected: "None available (balance: 0)",
+    },
+    {
+      credits: { hasCredits: false, unlimited: false, balance: "-0.000001" },
+      expected: "None available (balance: 0)",
+    },
+    {
+      credits: { hasCredits: false, unlimited: false, balance: "1.005" },
+      expected: "None available (balance: 1.01)",
+    },
+    {
+      credits: { hasCredits: false, unlimited: true, balance: "1.005" },
+      expected: "Unlimited (balance: 1.01)",
+    },
+    {
+      credits: { hasCredits: true, unlimited: true, balance: "<not-a-decimal>" },
+      expected: "Unlimited (balance: <not-a-decimal>)",
+    },
+    {
+      credits: { hasCredits: true, unlimited: false, balance: "1e-3" },
+      expected: "Available (balance: 1e-3)",
+    },
+  ])(
+    "keeps availability and opaque metadata independent of rounding: $credits",
+    ({ credits, expected }) => {
+      const snapshot = structuredClone(credits);
+      expect(
+        formatCodexRateLimitSummary({
+          checkedAt: "2026-09-30T00:00:00.000Z",
+          rateLimits: { credits },
+        })?.details.map((line) => line.text),
+      ).toEqual([`Credits: ${expected}`]);
+      expect(credits).toEqual(snapshot);
+    },
+  );
 
   it("shows individual spend amounts, zero remaining and provider-classified exhaustion", () => {
     const summary = formatCodexRateLimitSummary(
