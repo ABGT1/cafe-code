@@ -6,7 +6,20 @@
 @custom-variant wco (&:is(.wco, .wco *));
 
 @theme inline {
-  --animate-skeleton: skeleton 2s -1s infinite linear;
+  /* Quantize recurring status indicators to at most 60 visual updates/second.
+     Continuous compositor animations otherwise follow 240–500 Hz displays even
+     in an unfocused window. Steps apply per keyframe interval: pulse has two
+     1s intervals, ping moves for 0.75s, and skeleton has one 2s interval.
+     Duration overrides must keep the matching step count in sync. */
+  --animate-spin: spin var(--cafe-spin-duration, 1s) steps(var(--cafe-spin-steps, 60), end) infinite
+    var(--cafe-status-animation-play-state, running);
+  --animate-pulse: pulse 2s steps(60, end) infinite var(--cafe-status-animation-play-state, running);
+  --animate-ping: ping 1s steps(45, end) infinite var(--cafe-status-animation-play-state, running);
+  --animate-bounce: cafe-status-bounce var(--cafe-bounce-duration, 1s)
+    steps(var(--cafe-bounce-steps, 30), end) infinite
+    var(--cafe-status-animation-play-state, running);
+  --animate-skeleton: skeleton 2s -1s steps(120, end) infinite
+    var(--cafe-status-animation-play-state, running);
   --color-warning-foreground: var(--warning-foreground);
   --color-warning: var(--warning);
   --color-success-foreground: var(--success-foreground);
@@ -42,6 +55,17 @@
   @keyframes skeleton {
     to {
       background-position: -200% 0;
+    }
+  }
+  /* Tailwind's bounce puts easing on the keyframes themselves, which would
+     override the stepped timing function and restore display-rate rendering. */
+  @keyframes cafe-status-bounce {
+    0%,
+    100% {
+      transform: translateY(-25%);
+    }
+    50% {
+      transform: none;
     }
   }
 }
@@ -545,8 +569,22 @@ html[data-cafe-background-animations="paused"][data-cafe-window-focus="blurred"]
 html[data-cafe-background-animations="paused"][data-cafe-window-focus="blurred"]
   .cafe-followup-queue::before,
 html[data-cafe-background-animations="paused"][data-cafe-window-focus="blurred"]
-  .cafe-followup-queue::after {
+  .cafe-followup-queue::after,
+html[data-cafe-background-animations="paused"]:is(
+    [data-cafe-visibility="hidden"],
+    [data-cafe-window-focus="blurred"]
+  )
+  :is(.ultrathink-frame, .ultrathink-chroma, .ultrathink-pill, .ultrathink-word) {
   animation-play-state: paused;
+}
+
+/* Visible, unfocused status indicators retain their capped motion. Once the
+   document is hidden, even those updates have no visible benefit. Do not pause
+   finite enter/exit animations: their completion can drive popup cleanup.
+   An inherited variable also covers Tailwind variants such as loading toasts'
+   in-data-[type=loading]:animate-spin, without matching individual classes. */
+html[data-cafe-background-animations="paused"][data-cafe-visibility="hidden"] {
+  --cafe-status-animation-play-state: paused;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -1062,7 +1062,7 @@ function ThreadHistoryLoadingState() {
         <div className="relative mb-5 flex size-24 items-center justify-center" aria-hidden="true">
           <div className="absolute inset-1 rounded-full border border-primary/15 bg-gradient-to-br from-primary/10 via-card/20 to-cyan-400/10 shadow-[0_0_38px_rgba(56,189,248,0.12)]" />
           <div className="absolute inset-3 rounded-full border border-dashed border-foreground/15" />
-          <div className="absolute inset-0 animate-spin will-change-transform [animation-duration:5s] motion-reduce:animate-none">
+          <div className="absolute inset-0 animate-spin will-change-transform [--cafe-spin-duration:5s] [--cafe-spin-steps:300] motion-reduce:animate-none">
             <span className="absolute left-1/2 top-0 size-2.5 -translate-x-1/2 rounded-full bg-primary shadow-[0_0_12px_currentColor]" />
             <span className="absolute bottom-2 left-2.5 size-2 rounded-full bg-cyan-300/90 shadow-[0_0_10px_currentColor]" />
             <span className="absolute bottom-3 right-1.5 size-1.5 rounded-full bg-foreground/70" />

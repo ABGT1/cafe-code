@@ -995,7 +995,7 @@ export function ProviderInstanceCard({
                       )}
                       aria-label="Update available — view details"
                     >
-                      <ArrowUpCircleIcon className="size-3.5 [animation:bounce_2.4s_ease-in-out_infinite] motion-reduce:animate-none" />
+                      <ArrowUpCircleIcon className="size-3.5 animate-bounce [--cafe-bounce-duration:2.4s] [--cafe-bounce-steps:72] motion-reduce:animate-none" />
                     </Button>
                   }
                 />

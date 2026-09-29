@@ -3,7 +3,7 @@ vi.mock("~/store", () => ({
 }));
 import "../../index.css";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { page } from "vitest/browser";
+import { page, userEvent } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import {
@@ -120,6 +120,27 @@ async function mount(element: React.ReactNode) {
     </QueryClientProvider>,
   );
 }
+
+function composerWithDesktopPicker(onSend: () => void, compact: boolean) {
+  return (
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSend();
+      }}
+    >
+      <textarea aria-label="Prompt draft" defaultValue="Keep this unsent draft" />
+      <DesktopPicker
+        environmentId={environmentId}
+        threadId={threadId}
+        provider="codex"
+        compact={compact}
+      />
+      <button type="submit">Send draft</button>
+    </form>
+  );
+}
+
 describe("virtual desktops", () => {
   it.each([80, 100, 130])(
     "matches Goal typography and keeps next-turn status visible at %s percent",
@@ -238,22 +259,67 @@ describe("virtual desktops", () => {
     else delete window.desktopBridge;
   });
   it.each([false, true])(
-    "attaches a future draft from the shared picker, compact=%s",
+    "attaches and detaches a desktop without submitting the prompt, compact=%s",
     async (compact) => {
-      mounted = await mount(
-        <DesktopPicker
-          environmentId={environmentId}
-          threadId={threadId}
-          provider="codex"
-          compact={compact}
-        />,
-      );
+      const onSend = vi.fn();
+      mounted = await mount(composerWithDesktopPicker(onSend, compact));
       await page.getByRole("button", { name: "Desktop", exact: true }).click();
       await page.getByRole("menuitemradio", { name: "Research Ready" }).click();
       expect(harness.status).toHaveBeenCalledWith({ operation: "attach", id, threadId });
       await page.getByRole("button", { name: "Desktop: Research", exact: true }).click();
       await page.getByRole("menuitemradio", { name: "None", exact: true }).click();
       expect(harness.status).toHaveBeenCalledWith({ operation: "attach", id: null, threadId });
+      expect(onSend).not.toHaveBeenCalled();
+      await expect
+        .element(page.getByRole("textbox", { name: "Prompt draft" }))
+        .toHaveValue("Keep this unsent draft");
+      await page.getByRole("button", { name: "Send draft", exact: true }).click();
+      expect(onSend).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["create", "rename", "set-display"] as const)(
+    "keeps a portalled desktop %s form from submitting the prompt",
+    async (operation) => {
+      const onSend = vi.fn();
+      mounted = await mount(composerWithDesktopPicker(onSend, false));
+      await page.getByRole("button", { name: "Desktop", exact: true }).click();
+      if (operation === "create") {
+        await page.getByRole("menuitem", { name: "New desktop", exact: true }).click();
+        await page.getByRole("textbox", { name: "Name", exact: true }).fill("Testing");
+        // Enter submits the dialog's form just like its primary action button.
+        await userEvent.keyboard("{Enter}");
+      } else {
+        await page.getByRole("menuitem", { name: "Manage desktops", exact: true }).click();
+        await page.getByRole("button", { name: "Actions for Research" }).click();
+        if (operation === "rename") {
+          await page.getByRole("menuitem", { name: "Rename", exact: true }).click();
+          await page.getByRole("textbox", { name: "Desktop name" }).fill("Testing");
+          await page.getByRole("button", { name: "Save", exact: true }).click();
+        } else {
+          await page.getByRole("menuitem", { name: "Display settings", exact: true }).click();
+          await page.getByRole("combobox", { name: "Resolution" }).selectOptions("1920x1080");
+          await page.getByRole("button", { name: "Apply resolution", exact: true }).click();
+        }
+      }
+      await expect
+        .poll(
+          () =>
+            harness.status.mock.calls.filter(([request]) => request.operation === operation).length,
+        )
+        .toBe(1);
+      expect(onSend).not.toHaveBeenCalled();
+      if (operation !== "create") {
+        await page
+          .getByRole("dialog", { name: "Desktops", exact: true })
+          .getByRole("button", { name: "Close", exact: true })
+          .click();
+      }
+      await expect
+        .element(page.getByRole("textbox", { name: "Prompt draft" }))
+        .toHaveValue("Keep this unsent draft");
+      await page.getByRole("button", { name: "Send draft", exact: true }).click();
+      expect(onSend).toHaveBeenCalledOnce();
     },
   );
   it.each([false, true])(

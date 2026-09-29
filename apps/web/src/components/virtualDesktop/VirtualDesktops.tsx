@@ -78,6 +78,9 @@ function DesktopRow({
             className="flex min-w-0 flex-wrap items-center gap-2"
             onSubmit={(event) => {
               event.preventDefault();
+              // The manager can be opened from inside the composer. Its portal
+              // preserves React event ancestry, so contain this rename submit.
+              event.stopPropagation();
               void controls
                 .change({ operation: "rename", id: desktop.id, name: name.trim() })
                 .then((ok) => {
