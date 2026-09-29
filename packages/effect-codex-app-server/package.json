@@ -8,6 +8,10 @@
       "types": "./src/client.ts",
       "import": "./src/client.ts"
     },
+    "./compatibility": {
+      "types": "./src/compatibility.ts",
+      "import": "./src/compatibility.ts"
+    },
     "./schema": {
       "types": "./src/schema.ts",
       "import": "./src/schema.ts"

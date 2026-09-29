@@ -13,6 +13,7 @@ import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } f
 import { resolveEditorOpenOptions } from "../../editorOpenOptions";
 import { readLocalApi } from "~/localApi";
 import { toastManager } from "../ui/toast";
+import { useChatPane } from "../../chatPaneContext";
 
 function openFailureMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
@@ -29,6 +30,7 @@ export const OpenInPicker = memo(function OpenInPicker({
   terminal: TerminalAvailability;
   openInCwd: string | null;
 }) {
+  const pane = useChatPane();
   const [preferredEditor, setPreferredEditor] = usePreferredEditor(availableEditors);
   const options = useMemo(
     () => resolveEditorOpenOptions(navigator.platform, availableEditors),
@@ -74,6 +76,7 @@ export const OpenInPicker = memo(function OpenInPicker({
 
   useEffect(() => {
     const handler = (e: globalThis.KeyboardEvent) => {
+      if (!pane.active || !pane.visible || e.defaultPrevented) return;
       const api = readLocalApi();
       if (!isOpenFavoriteEditorShortcut(e, keybindings)) return;
       if (!api || !openInCwd) return;
@@ -90,7 +93,7 @@ export const OpenInPicker = memo(function OpenInPicker({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [preferredEditor, keybindings, openInCwd]);
+  }, [preferredEditor, keybindings, openInCwd, pane.active, pane.visible]);
 
   return (
     <Group aria-label="Subscription actions">

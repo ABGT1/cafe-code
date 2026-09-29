@@ -103,6 +103,10 @@ export type ServerProviderAccountSpendControlLimit =
 export const ServerProviderAccountRateLimitSnapshot = Schema.Struct({
   limitId: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
   limitName: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
+  // Codex 0.159 quota aliases identify the normal model whose display metadata
+  // describes the bucket. This is presentation metadata, never a model switch
+  // or an authorization to borrow usage/credits from another bucket.
+  normalModelSlug: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
   planType: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
   rateLimitReachedType: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
   spendControlReached: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),

@@ -32,7 +32,16 @@ import {
 
 import { truncate } from "@cafecode/shared/String";
 import { Debouncer } from "@tanstack/react-pacer";
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useShallow } from "zustand/react/shallow";
 import { useGitStatus } from "~/lib/gitStatusState";
@@ -129,6 +138,7 @@ import {
 import { buildDraftThreadRouteParams } from "../threadRoutes";
 import {
   type ComposerImageAttachment,
+  type ComposerThreadDraftState,
   type DraftThreadEnvMode,
   useComposerDraftStore,
   flushComposerDraftPersistence,
@@ -214,6 +224,14 @@ import {
   waitForStartedServerThread,
 } from "./ChatView.logic";
 import { useComposerHandleContext } from "../composerHandleContext";
+import type { TimelineViewPosition } from "./chat/timelineViewState";
+import {
+  useChatPane,
+  useChatPaneQueueOwnership,
+  useChatPaneResource,
+  useChatPaneSharedState,
+  useHasSharedChatRuntime,
+} from "../chatPaneContext";
 import {
   useServerAvailableEditors,
   useServerConfig,
@@ -435,7 +453,7 @@ function formatOutgoingPrompt(params: {
   const promptEffort = resolvePromptInjectedEffort(caps, params.effort);
   return applyClaudePromptEffortPrefix(params.text, promptEffort);
 }
-type ChatViewProps =
+type ChatViewProps = { readonly navigationSlot?: ReactNode } & (
   | {
       environmentId: EnvironmentId;
       threadId: ThreadId;
@@ -447,7 +465,8 @@ type ChatViewProps =
       threadId: ThreadId;
       routeKind: "draft";
       draftId: DraftId;
-    };
+    }
+);
 
 interface ComposerSendSnapshot {
   promptText: string;
@@ -815,12 +834,29 @@ function useLocalDispatchState(input: {
 
 export default function ChatView(props: ChatViewProps) {
   const { environmentId, threadId, routeKind } = props;
+  const pane = useChatPane();
+  const currentPaneRef = useRef(pane);
+  currentPaneRef.current = pane;
+  const sharedChatRuntime = useHasSharedChatRuntime();
+  const { owns: ownsQueuedThread, revision: queueOwnershipRevision } = useChatPaneQueueOwnership(
+    environmentId,
+    threadId,
+  );
+  const runtimeKey = `chat-runtime:${environmentId}:`;
   const draftId = routeKind === "draft" ? props.draftId : null;
   const routeThreadRef = useMemo(
     () => scopeThreadRef(environmentId, threadId),
     [environmentId, threadId],
   );
   const routeThreadKey = useMemo(() => scopedThreadKey(routeThreadRef), [routeThreadRef]);
+  const timelineViews = useChatPaneResource(
+    "timeline-views",
+    () => new Map<string, TimelineViewPosition>(),
+  );
+  const initialTimelinePosition = useMemo(
+    () => timelineViews.get(routeThreadKey) ?? null,
+    [timelineViews, routeThreadKey],
+  );
   const composerDraftTarget: ScopedThreadRef | DraftId =
     routeKind === "server" ? routeThreadRef : props.draftId;
   const serverThread = useStore(
@@ -841,8 +877,10 @@ export default function ChatView(props: ChatViewProps) {
     routeKind === "server" ? store.threadPlanSidebarOpenById[routeThreadKey] : undefined,
   );
   const setPersistedPlanSidebarOpen = useUiStateStore((store) => store.setThreadPlanSidebarOpen);
-  const sessionRailDocked = useUiStateStore((store) => store.sessionRailDocked);
-  const setSessionRailDocked = useUiStateStore((store) => store.setSessionRailDocked);
+  const globalSessionRailDocked = useUiStateStore((store) => store.sessionRailDocked);
+  const setGlobalSessionRailDocked = useUiStateStore((store) => store.setSessionRailDocked);
+  const sessionRailDocked = pane.sessionRailDocked ?? globalSessionRailDocked;
+  const setSessionRailDocked = pane.onSessionRailDockedChange ?? setGlobalSessionRailDocked;
   const settings = useSettings();
   const setStickyComposerModelSelection = useComposerDraftStore(
     (store) => store.setStickyModelSelection,
@@ -891,9 +929,22 @@ export default function ChatView(props: ChatViewProps) {
     (store) => store.getComposerDraft(composerDraftTarget)?.queueEditingItemId,
   );
   const localComposerRef = useRef<ChatComposerHandle | null>(null);
-  const composerRef = useComposerHandleContext() ?? localComposerRef;
+  const activeComposerHandle = useComposerHandleContext();
+  // Every pane owns its editor. Only the active pane publishes an alias for the
+  // global palette; sharing the actual ref lets a sibling send the wrong draft.
+  const composerRef = localComposerRef;
+  useLayoutEffect(() => {
+    if (!pane.active || !pane.visible || !activeComposerHandle) return;
+    const handle = composerRef.current;
+    activeComposerHandle.current = handle;
+    return () => {
+      if (activeComposerHandle.current === handle) activeComposerHandle.current = null;
+    };
+  });
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  const [timelineAutoFollowTail, setTimelineAutoFollowTail] = useState(true);
+  const [timelineAutoFollowTail, setTimelineAutoFollowTail] = useState(
+    initialTimelinePosition?.following ?? true,
+  );
   const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
   const [selectedSubagent, setSelectedSubagent] = useState<SubagentDetailSelection | null>(null);
   const selectedSubagentTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -929,7 +980,11 @@ export default function ChatView(props: ChatViewProps) {
   const [draftPlanSidebarOpenByThreadKey, setDraftPlanSidebarOpenByThreadKey] = useState<
     Record<string, boolean>
   >({});
-  const shouldUsePlanSidebarSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
+  const viewportNeedsPlanSidebarSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
+  const paneElementRef = useRef<HTMLDivElement | null>(null);
+  const [paneWidth, setPaneWidth] = useState<number | null>(null);
+  const shouldUsePlanSidebarSheet =
+    sharedChatRuntime && paneWidth !== null ? paneWidth <= 980 : viewportNeedsPlanSidebarSheet;
   const isMobile = useIsMobile();
   const hasOnScreenKeyboard = useHasOnScreenKeyboard();
   const draftPlanSidebarOpen =
@@ -953,32 +1008,69 @@ export default function ChatView(props: ChatViewProps) {
   const timelineForcedScrollGenerationRef = useRef(0);
   const attachmentPreviewHandoffByMessageIdRef = useRef<Record<string, string[]>>({});
   const attachmentPreviewPromotionInFlightByMessageIdRef = useRef<Record<string, true>>({});
-  const sendInFlightRef = useRef(false);
+  const sendInFlightByThread = useChatPaneResource(
+    `${runtimeKey}send-gates`,
+    () => new Map<string, { current: boolean }>(),
+  );
+  const sendInFlightRef = useMemo(() => {
+    const existing = sendInFlightByThread.get(threadId);
+    if (existing) return existing;
+    const gate = { current: false };
+    sendInFlightByThread.set(threadId, gate);
+    return gate;
+  }, [sendInFlightByThread, threadId]);
   const directSendFailureToastIdByThreadKeyRef = useRef<
     Map<string, ReturnType<typeof toastManager.add>>
   >(new Map());
-  const queueDispatchInFlightRef = useRef(false);
-  const pendingSteerDispatchByMessageIdRef = useRef<Record<string, PendingSteerDispatch>>({});
-  const [pendingSteerDispatchByMessageId, setPendingSteerDispatchByMessageId] = useState<
-    Record<string, PendingSteerDispatch>
-  >({});
+  const queueDispatchInFlightRef = useChatPaneResource(`${runtimeKey}queue-io`, () => ({
+    current: false,
+  }));
+  const [
+    pendingSteerDispatchByMessageId,
+    setPendingSteerDispatchByMessageId,
+    pendingSteerDispatchByMessageIdRef,
+  ] = useChatPaneSharedState<Record<string, PendingSteerDispatch>>(
+    `${runtimeKey}steers`,
+    () => ({}),
+  );
   // Durable retryable-failure activities can outlive this component. Track
   // which source messages this mount has already reconstructed or explicitly
   // dismissed so snapshot refreshes remain idempotent, while a real reload can
   // rebuild unresolved entries from canonical thread state again.
-  const handledRetryableSteerSourceMessageIdsRef = useRef<Set<string>>(new Set());
-  const legacyRootRecheckSourceMessageIdsRef = useRef<Set<string>>(new Set());
-  const retryableSteerReconstructionInFlightRef = useRef<Set<string>>(new Set());
-  const pendingSteerInterruptRecoveryByThreadIdRef = useRef<
-    Record<string, PendingSteerInterruptRecovery>
-  >({});
-  const [pendingSteerInterruptRecoveryByThreadId, setPendingSteerInterruptRecoveryByThreadId] =
-    useState<Record<string, PendingSteerInterruptRecovery>>({});
+  const handledRetryableSteerSourceMessageIdsRef = useChatPaneResource(
+    `${runtimeKey}handled-retries`,
+    () => ({ current: new Set<string>() }),
+  );
+  const legacyRootRecheckSourceMessageIdsRef = useChatPaneResource(
+    `${runtimeKey}legacy-retries`,
+    () => ({ current: new Set<string>() }),
+  );
+  const retryableSteerReconstructionInFlightRef = useChatPaneResource(
+    `${runtimeKey}retry-io`,
+    () => ({ current: new Set<string>() }),
+  );
+  const [
+    pendingSteerInterruptRecoveryByThreadId,
+    setPendingSteerInterruptRecoveryByThreadId,
+    pendingSteerInterruptRecoveryByThreadIdRef,
+  ] = useChatPaneSharedState<Record<string, PendingSteerInterruptRecovery>>(
+    `${runtimeKey}recoveries`,
+    () => ({}),
+  );
   // The main Stop control is not the queue row's interrupt-and-submit action.
   // Keep recovered and ordinary queued input available, but prevent the queue
   // watchdog from converting a user cancellation into a fresh provider turn.
-  const manualStopBarrierByThreadIdRef = useRef<Record<string, ManualStopBarrier>>({});
-  const desktopDebugEnabled = useDesktopDebugEnabled();
+  const manualStopBarrierByThreadIdRef = useChatPaneResource(`${runtimeKey}stops`, () => ({
+    current: {} as Record<string, ManualStopBarrier>,
+  }));
+  const manualStopGenerationByThreadIdRef = useChatPaneResource(
+    `${runtimeKey}stop-generations`,
+    () => ({
+      current: {} as Record<string, number>,
+    }),
+  );
+  const debugEnabled = useDesktopDebugEnabled();
+  const desktopDebugEnabled = debugEnabled && pane.active && pane.visible;
   const [desktopDebugRevision, setDesktopDebugRevision] = useState(0);
   const lastDesktopDebugSnapshotPublishedAtMsRef = useRef(0);
   const desktopDebugSnapshotThrottleTimeoutRef = useRef<number | null>(null);
@@ -995,16 +1087,22 @@ export default function ChatView(props: ChatViewProps) {
     lastAttemptItemId: null as string | null,
   });
   const [dispatchGateRevision, setDispatchGateRevision] = useState(0);
-  const setSendInFlight = useCallback((next: boolean) => {
-    if (sendInFlightRef.current === next) return;
-    sendInFlightRef.current = next;
-    setDispatchGateRevision((revision) => revision + 1);
-  }, []);
-  const setQueueDispatchInFlight = useCallback((next: boolean) => {
-    if (queueDispatchInFlightRef.current === next) return;
-    queueDispatchInFlightRef.current = next;
-    setDispatchGateRevision((revision) => revision + 1);
-  }, []);
+  const setSendInFlight = useCallback(
+    (next: boolean) => {
+      if (sendInFlightRef.current === next) return;
+      sendInFlightRef.current = next;
+      setDispatchGateRevision((revision) => revision + 1);
+    },
+    [sendInFlightRef],
+  );
+  const setQueueDispatchInFlight = useCallback(
+    (next: boolean) => {
+      if (queueDispatchInFlightRef.current === next) return;
+      queueDispatchInFlightRef.current = next;
+      setDispatchGateRevision((revision) => revision + 1);
+    },
+    [queueDispatchInFlightRef],
+  );
   useEffect(() => {
     chatViewMountedRef.current = true;
     return () => {
@@ -1041,7 +1139,7 @@ export default function ChatView(props: ChatViewProps) {
         setDesktopDebugRevision((revision) => revision + 1);
       }
     },
-    [desktopDebugEnabled],
+    [desktopDebugEnabled, pendingSteerDispatchByMessageIdRef, setPendingSteerDispatchByMessageId],
   );
   const removePendingSteerDispatch = useCallback(
     (messageId: MessageId) => {
@@ -1073,7 +1171,11 @@ export default function ChatView(props: ChatViewProps) {
         setDesktopDebugRevision((revision) => revision + 1);
       }
     },
-    [desktopDebugEnabled],
+    [
+      desktopDebugEnabled,
+      pendingSteerInterruptRecoveryByThreadIdRef,
+      setPendingSteerInterruptRecoveryByThreadId,
+    ],
   );
   const updateManualStopBarrier = useCallback(
     (threadId: ThreadId, barrier: ManualStopBarrier | null) => {
@@ -1091,11 +1193,15 @@ export default function ChatView(props: ChatViewProps) {
           [threadId]: barrier,
         };
       }
+      // A later explicit resume may remove the barrier, but must not revive
+      // pre-Stop asynchronous preparation from an older send attempt.
+      manualStopGenerationByThreadIdRef.current[threadId] =
+        (manualStopGenerationByThreadIdRef.current[threadId] ?? 0) + 1;
       if (desktopDebugEnabled) {
         setDesktopDebugRevision((revision) => revision + 1);
       }
     },
-    [desktopDebugEnabled],
+    [desktopDebugEnabled, manualStopBarrierByThreadIdRef, manualStopGenerationByThreadIdRef],
   );
   useEffect(() => {
     if (!desktopDebugEnabled) {
@@ -1125,7 +1231,10 @@ export default function ChatView(props: ChatViewProps) {
   const dispatchQueuedSteerRetryRef = useRef<((item: FollowUpQueueItem) => Promise<void>) | null>(
     null,
   );
-  const queuePersistence = useMemo(() => createFollowUpQueuePersistence(), []);
+  const queuePersistence = useChatPaneResource(
+    `${runtimeKey}persistence`,
+    createFollowUpQueuePersistence,
+  );
   const initialQueueLoadErrorRef = useRef<string | null>(null);
   useEffect(() => {
     if (initialQueueLoadErrorRef.current)
@@ -1135,20 +1244,31 @@ export default function ChatView(props: ChatViewProps) {
         description: initialQueueLoadErrorRef.current,
       });
   }, []);
-  const [followUpQueueByThreadId, setFollowUpQueueState] = useState<
-    Record<string, FollowUpQueueItem[]>
-  >(() => {
-    const loaded = queuePersistence.load(environmentId);
-    if (!loaded.ok) {
-      initialQueueLoadErrorRef.current = loaded.error;
-      return {};
-    }
-    const result: Record<string, FollowUpQueueItem[]> = {};
-    for (const item of [...loaded.value.pending, ...loaded.value.claimed])
-      (result[item.threadId] ??= []).push(item);
-    return result;
-  });
-  const queuePersistenceTailRef = useRef<Promise<unknown>>(Promise.resolve());
+  const [followUpQueueByThreadId, setFollowUpQueueState, followUpQueueByThreadIdRef] =
+    useChatPaneSharedState<Record<string, FollowUpQueueItem[]>>(
+      `${runtimeKey}queues`,
+      () => {
+        const loaded = queuePersistence.load(environmentId);
+        if (!loaded.ok) {
+          initialQueueLoadErrorRef.current = loaded.error;
+          return {};
+        }
+        const result: Record<string, FollowUpQueueItem[]> = {};
+        for (const item of [...loaded.value.pending, ...loaded.value.claimed])
+          (result[item.threadId] ??= []).push(item);
+        return result;
+      },
+      (queues) => {
+        // Shared queue previews belong to the layout runtime, not whichever tab
+        // happens to be selected. Closing a pane must not revoke another pane's image.
+        for (const items of Object.values(queues)) {
+          for (const item of items) revokeQueuedFollowUpPreviewUrls(item);
+        }
+      },
+    );
+  const queuePersistenceTailRef = useChatPaneResource(`${runtimeKey}persistence-tail`, () => ({
+    current: Promise.resolve() as Promise<unknown>,
+  }));
   const persistFollowUpQueues = useCallback(
     (targetEnvironmentId: EnvironmentId, queues: Record<string, FollowUpQueueItem[]>) => {
       const entries = Object.values(queues)
@@ -1160,9 +1280,8 @@ export default function ChatView(props: ChatViewProps) {
       queuePersistenceTailRef.current = operation;
       return operation;
     },
-    [queuePersistence],
+    [queuePersistence, queuePersistenceTailRef],
   );
-  const followUpQueueByThreadIdRef = useRef(followUpQueueByThreadId);
   const setFollowUpQueueByThreadId = useCallback(
     (
       update: (current: Record<string, FollowUpQueueItem[]>) => Record<string, FollowUpQueueItem[]>,
@@ -1173,9 +1292,11 @@ export default function ChatView(props: ChatViewProps) {
       followUpQueueByThreadIdRef.current = next;
       setFollowUpQueueState(next);
     },
-    [],
+    [followUpQueueByThreadIdRef, setFollowUpQueueState],
   );
-  const loadedQueueEnvironmentsRef = useRef(new Set([environmentId]));
+  const loadedQueueEnvironmentsRef = useChatPaneResource(`${runtimeKey}loaded`, () => ({
+    current: new Set([environmentId]),
+  }));
   useEffect(() => {
     if (loadedQueueEnvironmentsRef.current.has(environmentId)) return;
     loadedQueueEnvironmentsRef.current.add(environmentId);
@@ -1197,13 +1318,15 @@ export default function ChatView(props: ChatViewProps) {
         ];
       return next;
     });
-  }, [environmentId, queuePersistence, setFollowUpQueueByThreadId]);
-  const [queuedFollowUpPendingDispatchByThreadId, setQueuedFollowUpPendingDispatchByThreadId] =
-    useState<Record<string, QueuedFollowUpPendingDispatch>>({});
-  const queuedFollowUpPendingDispatchByThreadIdRef = useRef<
-    Record<string, QueuedFollowUpPendingDispatch>
-  >(queuedFollowUpPendingDispatchByThreadId);
-  queuedFollowUpPendingDispatchByThreadIdRef.current = queuedFollowUpPendingDispatchByThreadId;
+  }, [environmentId, queuePersistence, setFollowUpQueueByThreadId, loadedQueueEnvironmentsRef]);
+  const [
+    queuedFollowUpPendingDispatchByThreadId,
+    setQueuedFollowUpPendingDispatchByThreadId,
+    queuedFollowUpPendingDispatchByThreadIdRef,
+  ] = useChatPaneSharedState<Record<string, QueuedFollowUpPendingDispatch>>(
+    `${runtimeKey}pending-queue`,
+    () => ({}),
+  );
   const desktopDebugEnabledRef = useRef(desktopDebugEnabled);
   desktopDebugEnabledRef.current = desktopDebugEnabled;
 
@@ -1276,6 +1399,11 @@ export default function ChatView(props: ChatViewProps) {
   );
   const previousActiveThreadIdRef = useRef<ThreadId | null>(null);
   useEffect(() => {
+    // The old single-route migration guessed that one orphan queue belonged to
+    // the newly opened chat. In a Desk that can silently retarget another tab's
+    // input. Draft promotion retains its explicit thread identity; unknown rows
+    // stay attached to their original identity instead of guessing a recipient.
+    if (sharedChatRuntime) return;
     if (!activeThreadId) {
       return;
     }
@@ -1293,7 +1421,7 @@ export default function ChatView(props: ChatViewProps) {
         knownThreadIds,
       }),
     );
-  }, [activeThreadId, knownThreadIds, setFollowUpQueueByThreadId]);
+  }, [activeThreadId, knownThreadIds, setFollowUpQueueByThreadId, sharedChatRuntime]);
   const setQueuedFollowUpPendingDispatch = useCallback(
     (pending: QueuedFollowUpPendingDispatch | null, targetThreadId: ThreadId) => {
       const current = queuedFollowUpPendingDispatchByThreadIdRef.current;
@@ -1323,7 +1451,7 @@ export default function ChatView(props: ChatViewProps) {
         queuedFollowUpPendingDispatchByThreadIdRef.current,
       );
     },
-    [],
+    [queuedFollowUpPendingDispatchByThreadIdRef, setQueuedFollowUpPendingDispatchByThreadId],
   );
   const activeLatestTurn = activeThread?.latestTurn ?? null;
   const recordTimelineScrollDebugEvent = useCallback((input: TimelineScrollDebugEventInput) => {
@@ -1486,7 +1614,16 @@ export default function ChatView(props: ChatViewProps) {
         }
       })();
     }
-  }, [activeThread, removePendingSteerDispatch, setFollowUpQueueByThreadId]);
+  }, [
+    activeThread,
+    removePendingSteerDispatch,
+    setFollowUpQueueByThreadId,
+    followUpQueueByThreadIdRef,
+    pendingSteerDispatchByMessageIdRef,
+    handledRetryableSteerSourceMessageIdsRef,
+    retryableSteerReconstructionInFlightRef,
+    legacyRootRecheckSourceMessageIdsRef,
+  ]);
   useEffect(() => {
     const recoveries = Object.values(pendingSteerInterruptRecoveryByThreadId);
     if (recoveries.length === 0) {
@@ -1496,6 +1633,7 @@ export default function ChatView(props: ChatViewProps) {
     const threadsById = new Map(allThreads.map((thread) => [thread.id, thread]));
 
     for (const recovery of recoveries) {
+      if (!ownsQueuedThread(recovery.environmentId, recovery.threadId)) continue;
       const thread = threadsById.get(recovery.threadId);
       if (thread === undefined) {
         continue;
@@ -1611,6 +1749,9 @@ export default function ChatView(props: ChatViewProps) {
     setFollowUpQueueByThreadId,
     updatePendingSteerDispatches,
     updatePendingSteerInterruptRecoveries,
+    ownsQueuedThread,
+    queueOwnershipRevision,
+    pendingSteerDispatchByMessageIdRef,
   ]);
   useEffect(() => {
     if (Object.keys(pendingSteerDispatchByMessageId).length === 0) {
@@ -1644,6 +1785,7 @@ export default function ChatView(props: ChatViewProps) {
     pendingSteerDispatchByMessageId,
     pendingSteerInterruptRecoveryByThreadId,
     updatePendingSteerDispatches,
+    pendingSteerInterruptRecoveryByThreadIdRef,
   ]);
   const threadPlanCatalog = useThreadPlanCatalog(
     useMemo(() => {
@@ -1829,6 +1971,7 @@ export default function ChatView(props: ChatViewProps) {
   );
 
   useEffect(() => {
+    if (!pane.active || !pane.visible) return;
     if (!serverThread?.id) return;
     if (!latestTurnSettled) return;
     if (!activeLatestTurn?.completedAt) return;
@@ -1848,6 +1991,8 @@ export default function ChatView(props: ChatViewProps) {
     markThreadVisited,
     serverThread?.environmentId,
     serverThread?.id,
+    pane.active,
+    pane.visible,
   ]);
 
   const selectedProviderByThreadId = composerActiveProvider ?? null;
@@ -2064,11 +2209,12 @@ export default function ChatView(props: ChatViewProps) {
   const visibleSidebarProposedPlan = runtimeTurnBlocksPlanSidebar ? null : sidebarProposedPlan;
   const hasPlanSidebarContent = visibleSidebarProposedPlan !== null;
   useEffect(() => {
-    if (serverAcknowledgedLocalDispatch) {
+    if (serverAcknowledgedLocalDispatch && !sharedChatRuntime) {
       setSendInFlight(false);
-      setQueueDispatchInFlight(false);
+      // The queue IO owner releases its shared gate in finally. A projection
+      // ACK can precede completion and must not unlock another pane's dispatch.
     }
-  }, [serverAcknowledgedLocalDispatch, setQueueDispatchInFlight, setSendInFlight]);
+  }, [serverAcknowledgedLocalDispatch, setSendInFlight, sharedChatRuntime]);
   const isWorking =
     phase === "running" || isSendBusy || isComposerConnecting || isRevertingCheckpoint;
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
@@ -2115,13 +2261,15 @@ export default function ChatView(props: ChatViewProps) {
       for (const message of optimisticUserMessagesRef.current) {
         revokeUserMessagePreviewUrls(message);
       }
-      for (const items of Object.values(followUpQueueByThreadIdRef.current)) {
-        for (const item of items) {
-          revokeQueuedFollowUpPreviewUrls(item);
+      if (!sharedChatRuntime) {
+        for (const items of Object.values(followUpQueueByThreadIdRef.current)) {
+          for (const item of items) {
+            revokeQueuedFollowUpPreviewUrls(item);
+          }
         }
       }
     };
-  }, [clearAttachmentPreviewHandoffs]);
+  }, [clearAttachmentPreviewHandoffs, sharedChatRuntime, followUpQueueByThreadIdRef]);
   const handoffAttachmentPreviews = useCallback((messageId: MessageId, previewUrls: string[]) => {
     if (previewUrls.length === 0) return;
 
@@ -2563,7 +2711,12 @@ export default function ChatView(props: ChatViewProps) {
     }
     queuedFollowUpPendingDispatchByThreadIdRef.current = nextPending;
     setQueuedFollowUpPendingDispatchByThreadId(nextPending);
-  }, [allThreads, queuedFollowUpPendingDispatchByThreadId]);
+  }, [
+    allThreads,
+    queuedFollowUpPendingDispatchByThreadId,
+    queuedFollowUpPendingDispatchByThreadIdRef,
+    setQueuedFollowUpPendingDispatchByThreadId,
+  ]);
   const activeQueueTurnId = activeThread?.session?.activeTurnId ?? null;
   const followUpQueuePhase = resolveFollowUpQueuePhase({
     phase,
@@ -2626,36 +2779,45 @@ export default function ChatView(props: ChatViewProps) {
       followUpQueuePhase,
       activeProviderLiveSteerAvailable,
       followUpQueueVisibleWorking,
+      queueDispatchInFlightRef,
+      sendInFlightRef,
     ],
   );
-  const followUpQueueViewItems = useMemo<readonly FollowUpQueueViewItem[]>(
-    () =>
-      activeFollowUpQueue.map((item) => ({
-        id: item.id,
-        preview: previewQueuedFollowUpText(item.promptText),
-        promptText: item.promptText,
-        images: item.images,
-        files: item.files,
-        environmentId: item.environmentId,
-        canEdit:
-          item.dispatchState !== "claimed" &&
-          !queueEditingItemId &&
-          !sendInFlightRef.current &&
-          !queueDispatchInFlightRef.current,
-        canDispatch: item.dispatchState !== "claimed" && !queueEditingItemId,
-        canRetryDelivery: canRetryAutomaticSteerItem(item),
-        queuedAt: item.queuedAt,
-        expanded: item.expanded,
-        canExpand:
-          canExpandQueuedFollowUpText(item.promptText) ||
-          item.images.length > 0 ||
-          item.files.length > 0,
-        blockedReason: item.blockedReason,
-        automaticSteerRetry:
-          item.automaticSteerRetry === undefined ? null : item.automaticSteerRetry,
-      })),
-    [activeFollowUpQueue, queueEditingItemId, canRetryAutomaticSteerItem, dispatchGateRevision],
-  );
+  const followUpQueueViewItems = useMemo<readonly FollowUpQueueViewItem[]>(() => {
+    // This mutable gate deliberately avoids broadcasting every dispatch to
+    // all panes; its local revision refreshes row affordances when it changes.
+    void dispatchGateRevision;
+    return activeFollowUpQueue.map((item) => ({
+      id: item.id,
+      preview: previewQueuedFollowUpText(item.promptText),
+      promptText: item.promptText,
+      images: item.images,
+      files: item.files,
+      environmentId: item.environmentId,
+      canEdit:
+        item.dispatchState !== "claimed" &&
+        !queueEditingItemId &&
+        !sendInFlightRef.current &&
+        !queueDispatchInFlightRef.current,
+      canDispatch: item.dispatchState !== "claimed" && !queueEditingItemId,
+      canRetryDelivery: canRetryAutomaticSteerItem(item),
+      queuedAt: item.queuedAt,
+      expanded: item.expanded,
+      canExpand:
+        canExpandQueuedFollowUpText(item.promptText) ||
+        item.images.length > 0 ||
+        item.files.length > 0,
+      blockedReason: item.blockedReason,
+      automaticSteerRetry: item.automaticSteerRetry === undefined ? null : item.automaticSteerRetry,
+    }));
+  }, [
+    activeFollowUpQueue,
+    queueEditingItemId,
+    canRetryAutomaticSteerItem,
+    dispatchGateRevision,
+    queueDispatchInFlightRef,
+    sendInFlightRef,
+  ]);
   const steeringFollowUpViewItems = useMemo<readonly SteeringFollowUpViewItem[]>(
     () =>
       Object.values(pendingSteerDispatchByMessageId)
@@ -2698,10 +2860,19 @@ export default function ChatView(props: ChatViewProps) {
     liveSteerSupported: activeProviderLiveSteerAvailable,
   });
   useEffect(() => {
+    // A Desk tab can remount while its previous submission is awaiting an ACK.
+    // Only that submission's finally/ack path may release the shared lock.
+    if (sharedChatRuntime) return;
     if (activeFollowUpQueue.length > 0 && followUpQueueUiIdle && sendInFlightRef.current) {
       setSendInFlight(false);
     }
-  }, [activeFollowUpQueue.length, followUpQueueUiIdle, setSendInFlight]);
+  }, [
+    activeFollowUpQueue.length,
+    followUpQueueUiIdle,
+    setSendInFlight,
+    sharedChatRuntime,
+    sendInFlightRef,
+  ]);
   useEffect(() => {
     if (!desktopDebugEnabled) {
       return;
@@ -3366,6 +3537,11 @@ export default function ChatView(props: ChatViewProps) {
     timelineAutoFollowTail,
     timelineEntries.length,
     stickTimelineToEndRevision,
+    manualStopBarrierByThreadIdRef,
+    pendingSteerInterruptRecoveryByThreadIdRef,
+    followUpQueueByThreadIdRef,
+    queueDispatchInFlightRef,
+    sendInFlightRef,
   ]);
   const activeProjectCwd = activeProject?.cwd ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
@@ -3431,6 +3607,7 @@ export default function ChatView(props: ChatViewProps) {
   );
 
   const focusComposer = useCallback(() => {
+    if (!currentPaneRef.current.active || !currentPaneRef.current.visible) return;
     readComposerHandle(composerRef)?.focusAtEnd();
   }, [composerRef]);
   const scheduleComposerFocus = useCallback(() => {
@@ -3772,13 +3949,19 @@ export default function ChatView(props: ChatViewProps) {
     });
     setPullRequestDialogState(null);
     timelineForcedScrollGenerationRef.current += 1;
-    isAtEndRef.current = true;
-    timelineUserScrollIntentSinceResetRef.current = false;
+    const following = initialTimelinePosition?.following ?? true;
+    isAtEndRef.current = following;
+    timelineUserScrollIntentSinceResetRef.current = !following;
     clearTimelineUserScrollIntentSettle();
-    setTimelineAutoFollowTail(true);
+    setTimelineAutoFollowTail(following);
     showScrollDebouncer.current.cancel();
-    setShowScrollToBottom(false);
-  }, [activeThread?.id, clearTimelineUserScrollIntentSettle, recordTimelineScrollDebugEvent]);
+    setShowScrollToBottom(!following);
+  }, [
+    activeThread?.id,
+    clearTimelineUserScrollIntentSettle,
+    recordTimelineScrollDebugEvent,
+    initialTimelinePosition,
+  ]);
 
   // The optional side panel is now reserved for a completed, authored plan
   // document. Runtime todo snapshots stay in the composer progress popover and
@@ -3816,6 +3999,8 @@ export default function ChatView(props: ChatViewProps) {
   // composer stays collapsed until then). Desktop behavior is unchanged.
   useEffect(() => {
     if (!activeThread?.id) return;
+    if (pane.autoFocusComposer === false) return;
+    if (!pane.active || !pane.visible) return;
     if (isMobile || hasOnScreenKeyboard) return;
     const frame = window.requestAnimationFrame(() => {
       focusComposer();
@@ -3823,7 +4008,15 @@ export default function ChatView(props: ChatViewProps) {
     return () => {
       window.cancelAnimationFrame(frame);
     };
-  }, [activeThread?.id, focusComposer, hasOnScreenKeyboard, isMobile]);
+  }, [
+    activeThread?.id,
+    focusComposer,
+    hasOnScreenKeyboard,
+    isMobile,
+    pane.active,
+    pane.visible,
+    pane.autoFocusComposer,
+  ]);
 
   useEffect(() => {
     if (!activeThread?.id) return;
@@ -3916,6 +4109,7 @@ export default function ChatView(props: ChatViewProps) {
 
   useEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
+      if (!pane.active || !pane.visible) return;
       if (!activeThreadId || useCommandPaletteStore.getState().open || event.defaultPrevented) {
         return;
       }
@@ -3937,7 +4131,7 @@ export default function ChatView(props: ChatViewProps) {
     };
     window.addEventListener("keydown", handler, true);
     return () => window.removeEventListener("keydown", handler, true);
-  }, [activeThreadId, composerRef, keybindings]);
+  }, [activeThreadId, composerRef, keybindings, pane.active, pane.visible]);
 
   const onRevertToTurnCount = useCallback(
     async (turnCount: number) => {
@@ -4050,9 +4244,22 @@ export default function ChatView(props: ChatViewProps) {
         (snapshot.files.length > 0 ? FILE_ONLY_BOOTSTRAP_PROMPT : IMAGE_ONLY_BOOTSTRAP_PROMPT),
     });
 
-  const clearActiveComposerContent = () => {
+  const clearActiveComposerContent = (expected: ComposerThreadDraftState | null) => {
+    const current = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
+    // Persistence and steering ACKs may resolve after this view has closed and
+    // the same chat has reopened. Only consume the content this attempt read;
+    // a stale component must never erase the reopened editor's newer draft.
+    // Content arrays are immutable in the draft store. Provider/default edits
+    // may change the surrounding record without changing this exact payload.
+    if (
+      current?.prompt !== expected?.prompt ||
+      current?.images !== expected?.images ||
+      current?.files !== expected?.files ||
+      current?.queueEditingItemId !== expected?.queueEditingItemId
+    )
+      return;
     clearComposerDraftContent(composerDraftTarget);
-    if (currentRouteThreadKeyRef.current !== routeThreadKey) return;
+    if (!chatViewMountedRef.current || currentRouteThreadKeyRef.current !== routeThreadKey) return;
     promptRef.current = "";
     composerRef.current?.resetCursorState();
     // Desktop keeps its efficient type-send-type loop. On touch devices,
@@ -4092,6 +4299,9 @@ export default function ChatView(props: ChatViewProps) {
     options: { readonly preserveComposer?: boolean; readonly id?: string } = {},
   ): Promise<boolean> => {
     if (!activeThread || sendInFlightRef.current || queueDispatchInFlightRef.current) return false;
+    const composerContentAtAdmission = useComposerDraftStore
+      .getState()
+      .getComposerDraft(composerDraftTarget);
     if (parseComposerCompactionCommand(snapshot.provider, snapshot.promptText) !== null) {
       setThreadError(
         activeThread.id,
@@ -4157,7 +4367,7 @@ export default function ChatView(props: ChatViewProps) {
       ],
     }));
     setThreadError(activeThread.id, null);
-    if (!options.preserveComposer) clearActiveComposerContent();
+    if (!options.preserveComposer) clearActiveComposerContent(composerContentAtAdmission);
     return true;
   };
 
@@ -4241,6 +4451,18 @@ export default function ChatView(props: ChatViewProps) {
   };
 
   const dispatchFollowUpTurnStart = async (item: FollowUpQueueItem) => {
+    if (!ownsQueuedThread(item.environmentId, item.threadId)) return;
+    if (manualStopBarrierByThreadIdRef.current[item.threadId] !== undefined) return;
+    // A Stop followed by a newer explicit input may clear the visible barrier
+    // while this older attempt is still preparing attachments/settings. The
+    // monotonic, shared thread generation fences that old continuation even
+    // across a pane close/remount; checking only the current boolean cannot.
+    const stopGeneration = manualStopGenerationByThreadIdRef.current[item.threadId] ?? 0;
+    const wasStoppedDuringPreparation = () =>
+      manualStopBarrierByThreadIdRef.current[item.threadId] !== undefined ||
+      (manualStopGenerationByThreadIdRef.current[item.threadId] ?? 0) !== stopGeneration;
+    const stoppedBeforeSubmissionMessage =
+      "Stopped before sending. Select this queued message to send it.";
     if (
       item.dispatchState === "claimed" ||
       (item.automaticSteerRetry && item.blockedReason !== null)
@@ -4300,6 +4522,22 @@ export default function ChatView(props: ChatViewProps) {
       messageId: messageIdForSend,
       commandId: commandIdForSend,
     };
+    const parkUnattemptedItem = async (reason: string) => {
+      if (item.automaticSteerRetry) return;
+      // A pending item is safe to retry, but retry is still explicit after a
+      // Stop or preparation failure. Persist its blocked flag through exact
+      // compare-and-replace so reloading cannot silently resume stopped work.
+      const parked = await queuePersistence.replacePending(item, {
+        ...item,
+        blockedReason: reason,
+      });
+      if (!parked.ok)
+        toastManager.add({
+          type: "error",
+          title: "Queued message was not sent, but its paused state could not be saved",
+          description: parked.error,
+        });
+    };
     if (!item.automaticSteerRetry) {
       const saved =
         item.dispatchState === undefined
@@ -4314,9 +4552,9 @@ export default function ChatView(props: ChatViewProps) {
         }
         return;
       }
-      const claimed = queuePersistence.claim(claim, item);
-      if (!claimed.ok) {
-        blockFollowUpQueueItem(item.threadId, item.id, claimed.error);
+      if (wasStoppedDuringPreparation()) {
+        await parkUnattemptedItem(stoppedBeforeSubmissionMessage);
+        blockFollowUpQueueItem(item.threadId, item.id, stoppedBeforeSubmissionMessage);
         setQueueDispatchInFlight(false);
         if (isVisibleThread) {
           setSendInFlight(false);
@@ -4356,16 +4594,36 @@ export default function ChatView(props: ChatViewProps) {
     }
 
     let turnStartSucceeded = false;
+    let providerSubmissionAttempted = false;
+    let stoppedBeforeSubmission = false;
     try {
-      await persistThreadSettingsForNextTurn({
-        thread: queuedThread,
-        threadId: item.threadId,
-        createdAt: messageCreatedAt,
-        modelSelection: item.modelSelection,
-        runtimeMode: item.runtimeMode,
-        interactionMode: item.interactionMode,
-      });
-      const turnAttachments = await turnAttachmentsPromise;
+      // Observe both parallel preparations immediately so an early attachment
+      // rejection cannot become unhandled while settings persistence is slow.
+      const [, turnAttachments] = await Promise.all([
+        persistThreadSettingsForNextTurn({
+          thread: queuedThread,
+          threadId: item.threadId,
+          createdAt: messageCreatedAt,
+          modelSelection: item.modelSelection,
+          runtimeMode: item.runtimeMode,
+          interactionMode: item.interactionMode,
+        }),
+        turnAttachmentsPromise,
+      ]);
+      if (wasStoppedDuringPreparation()) {
+        stoppedBeforeSubmission = true;
+        throw new Error(stoppedBeforeSubmissionMessage);
+      }
+      // Claim only at the actual delivery boundary, after all awaited setup.
+      // Stop during setup leaves a definitely unattempted durable pending item,
+      // rather than manufacturing an ambiguous claim that cannot be retried.
+      // Keep claim + provider submission in the same synchronous continuation:
+      // no user Stop event can interleave between the final fence and I/O.
+      if (!item.automaticSteerRetry) {
+        const claimed = queuePersistence.claim(claim, item);
+        if (!claimed.ok) throw new Error(claimed.error);
+      }
+      providerSubmissionAttempted = true;
       await api.orchestration.dispatchCommand({
         type: "thread.turn.start",
         commandId: commandIdForSend,
@@ -4408,6 +4666,7 @@ export default function ChatView(props: ChatViewProps) {
         err,
         "Failed to send queued follow-up.",
       );
+      if (!providerSubmissionAttempted) await parkUnattemptedItem(queuedFollowUpError);
       setFollowUpQueueByThreadId((existing) => ({
         ...existing,
         [item.threadId]: [
@@ -4430,7 +4689,7 @@ export default function ChatView(props: ChatViewProps) {
                     },
                   }
               : {}),
-            ...(!item.automaticSteerRetry
+            ...(!item.automaticSteerRetry && providerSubmissionAttempted
               ? {
                   dispatchState: "claimed" as const,
                   claimedDispatch: { commandId: commandIdForSend, messageId: messageIdForSend },
@@ -4440,7 +4699,9 @@ export default function ChatView(props: ChatViewProps) {
           ...(existing[item.threadId] ?? EMPTY_FOLLOW_UP_QUEUE),
         ],
       }));
-      setThreadError(item.threadId, queuedFollowUpError);
+      // A user cancellation is a parked queue item, not a failed provider turn.
+      // Its visible row explains how to resume without adding an error banner.
+      if (!stoppedBeforeSubmission) setThreadError(item.threadId, queuedFollowUpError);
       if (item.automaticSteerRetry) {
         recordFollowUpQueueDebugAttempt(
           "automatic-steer-retry",
@@ -4484,6 +4745,9 @@ export default function ChatView(props: ChatViewProps) {
     if (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.queueEditingItemId)
       return;
     if (sendInFlightRef.current || queueDispatchInFlightRef.current) return;
+    const composerContentAtAdmission = useComposerDraftStore
+      .getState()
+      .getComposerDraft(composerDraftTarget);
     if (!activeProviderLiveSteerAvailable || phase !== "running") {
       if (!options?.queuedItem) {
         await enqueueFollowUpSnapshot(snapshot);
@@ -4620,7 +4884,7 @@ export default function ChatView(props: ChatViewProps) {
       });
       setThreadError(activeThread.id, null);
       if (!options?.queuedItem) {
-        clearActiveComposerContent();
+        clearActiveComposerContent(composerContentAtAdmission);
       }
     } catch (err) {
       removePendingSteerDispatch(messageIdForSend);
@@ -4738,6 +5002,8 @@ export default function ChatView(props: ChatViewProps) {
     followUpQueueByThreadId,
     followUpQueuePhase,
     recordFollowUpQueueDebugAttempt,
+    followUpQueueByThreadIdRef,
+    manualStopBarrierByThreadIdRef,
   ]);
 
   const onSend = async (e?: { preventDefault: () => void }) => {
@@ -4751,7 +5017,8 @@ export default function ChatView(props: ChatViewProps) {
       isSendBusy ||
       isComposerConnecting ||
       activeEnvironmentUnavailable ||
-      sendInFlightRef.current
+      sendInFlightRef.current ||
+      queueDispatchInFlightRef.current
     )
       return;
     if (activePendingUserInput?.interaction) return;
@@ -5697,6 +5964,8 @@ export default function ChatView(props: ChatViewProps) {
         queuesByThreadId,
         preferredThreadId: activeThreadId,
         canStart: ({ item, queueLength }) => {
+          if (!ownsQueuedThread(item.environmentId, item.threadId)) return false;
+          if (sendInFlightByThread.get(item.threadId)?.current) return false;
           if (item.dispatchState === "claimed") return false;
           if (
             useComposerDraftStore
@@ -5753,6 +6022,12 @@ export default function ChatView(props: ChatViewProps) {
       isThreadEnvironmentUnavailable,
       recordFollowUpQueueDebugAttempt,
       resolveQueuedFollowUpThread,
+      ownsQueuedThread,
+      sendInFlightByThread,
+      followUpQueueByThreadIdRef,
+      queuedFollowUpPendingDispatchByThreadIdRef,
+      queueDispatchInFlightRef,
+      manualStopBarrierByThreadIdRef,
     ],
   );
 
@@ -5764,6 +6039,7 @@ export default function ChatView(props: ChatViewProps) {
     followUpQueueByThreadId,
     queuedFollowUpPendingDispatchByThreadId,
     tryDispatchNextQueuedFollowUp,
+    queueOwnershipRevision,
   ]);
 
   useEffect(() => {
@@ -6175,6 +6451,7 @@ export default function ChatView(props: ChatViewProps) {
       setThreadError,
       composerRef,
       environmentId,
+      sendInFlightRef,
     ],
   );
 
@@ -6311,6 +6588,7 @@ export default function ChatView(props: ChatViewProps) {
     setSendInFlight,
     composerRef,
     environmentId,
+    sendInFlightRef,
   ]);
 
   const onProviderModelSelect = useCallback(
@@ -6455,13 +6733,29 @@ export default function ChatView(props: ChatViewProps) {
   }, []);
 
   // Empty state: no active thread
+  useLayoutEffect(() => {
+    if (!sharedChatRuntime) return;
+    const element = paneElementRef.current;
+    if (!element) return;
+    const measure = () => setPaneWidth(element.getBoundingClientRect().width);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [sharedChatRuntime, activeThread?.id]);
+
   if (!activeThread) {
     return <NoActiveThreadState />;
   }
 
   const shouldRenderPlanSidebar = planSidebarOpen && hasPlanSidebarContent;
-  const sessionRailVisible = sessionRailDocked && !shouldUsePlanSidebarSheet;
-  const canDockSessionRail = !shouldUsePlanSidebarSheet;
+  // The former viewport breakpoint assumed one chat. Desk panes use their own
+  // width; preserve the saved pin on narrow panes while the composer popovers
+  // remain available, and restore the rail as soon as there is usable room.
+  const canDockSessionRail = sharedChatRuntime
+    ? (paneWidth ?? 0) >= 540
+    : !shouldUsePlanSidebarSheet;
+  const sessionRailVisible = sessionRailDocked && canDockSessionRail;
   const sessionRailUsage = deriveLatestContextWindowSnapshot(threadActivities);
   const sessionRailRateLimits = shouldSurfaceProviderAccountRateLimits(activeProviderStatus)
     ? (activeProviderStatus?.accountRateLimits ?? null)
@@ -6470,7 +6764,10 @@ export default function ChatView(props: ChatViewProps) {
     (shouldRenderPlanSidebar && !shouldUsePlanSidebarSheet) || sessionRailVisible;
 
   return (
-    <div className="group/chat-view flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
+    <div
+      ref={paneElementRef}
+      className="group/chat-view flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background"
+    >
       {/* Top bar — hidden while the mobile composer has the on-screen keyboard
           open (data attribute set by ChatComposer) to maximize vertical room. */}
       <header
@@ -6493,6 +6790,7 @@ export default function ChatView(props: ChatViewProps) {
           terminal={terminal}
         />
       </header>
+      {props.navigationSlot}
 
       {/* Error banner */}
       <ProviderStatusBanner status={activeProviderStatus} />
@@ -6535,6 +6833,9 @@ export default function ChatView(props: ChatViewProps) {
               skills={activeProviderStatus?.skills ?? EMPTY_PROVIDER_SKILLS}
               stickToEndRevision={stickTimelineToEndRevision}
               autoFollowTail={timelineAutoFollowTail}
+              initialViewPosition={initialTimelinePosition}
+              viewPositionCache={timelineViews}
+              viewPositionKey={routeThreadKey}
               onIsAtEndChange={onIsAtEndChange}
               onUserScrollIntent={onTimelineUserScrollIntent}
               selectedSubagent={selectedSubagent}
@@ -6727,6 +7028,11 @@ export default function ChatView(props: ChatViewProps) {
         {shouldRenderRightColumn ? (
           <div
             className="flex min-h-0 w-[340px] shrink-0 flex-col border-l border-border/70 bg-card/50"
+            style={
+              sharedChatRuntime
+                ? { width: Math.min(340, Math.max(220, (paneWidth ?? 660) / 3)) }
+                : undefined
+            }
             data-chat-right-column="true"
           >
             {shouldRenderPlanSidebar ? (

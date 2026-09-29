@@ -39,6 +39,7 @@ import {
   checkCodexCliProviderStatus,
   checkCodexProviderStatus,
   isCodexCliLoginStatusProbeInconclusive,
+  readCodexAccountRateLimits,
   type CodexAppServerProviderSnapshot,
 } from "./CodexProvider.ts";
 import {
@@ -74,6 +75,7 @@ import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.t
 import { ProviderInstanceRegistryMutator } from "../Services/ProviderInstanceRegistryMutator.ts";
 import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
+import { parseCodexRateLimitUpdate } from "../codexRateLimits.ts";
 const decodeServerSettings = Schema.decodeSync(ServerSettings);
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
@@ -1040,6 +1042,57 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
         assert.strictEqual(merged.rateLimitsByLimitId?.codex_bengalfox?.primary?.usedPercent, 5);
         assert.deepStrictEqual(merged.rateLimitResetCredits, { availableCount: 1 });
         assert.strictEqual(merged.checkedAt, "2026-08-12T10:01:00.000Z");
+      });
+
+      it("retains quota aliases across sparse updates without borrowing canonical credits", () => {
+        const previous = {
+          rateLimits: {
+            limitId: "codex",
+            normalModelSlug: null,
+            credits: { hasCredits: true, unlimited: false, balance: "9.99" },
+          },
+          rateLimitsByLimitId: {
+            reserve: {
+              limitId: "reserve",
+              normalModelSlug: "gpt-5.6-luna",
+              credits: { hasCredits: false, unlimited: false, balance: "0" },
+              rateLimitReachedType: "workspace_member_credits_depleted",
+              secondary: { usedPercent: 25 },
+            },
+          },
+          checkedAt: "2026-09-29T00:00:00.000Z",
+        };
+        const update = parseCodexRateLimitUpdate({
+          rateLimits: {
+            limitId: "reserve",
+            normalModelSlug: null,
+            credits: null,
+            rateLimitReachedType: null,
+            primary: { usedPercent: 0 },
+          },
+        });
+        assert.ok(update);
+        const merged = mergeProviderAccountRateLimitSnapshot({
+          previous,
+          ...update,
+          checkedAt: "2026-09-29T00:01:00.000Z",
+        });
+        assert.deepStrictEqual(merged.rateLimits, previous.rateLimits);
+        assert.deepStrictEqual(merged.rateLimitsByLimitId?.reserve, {
+          ...previous.rateLimitsByLimitId.reserve,
+          primary: { usedPercent: 0 },
+        });
+
+        const newBucket = mergeProviderAccountRateLimitSnapshot({
+          previous: merged,
+          limitId: "another-alias",
+          snapshot: { normalModelSlug: "gpt-6-sol", primary: { usedPercent: 0 } },
+          checkedAt: "2026-09-29T00:02:00.000Z",
+        });
+        assert.deepStrictEqual(newBucket.rateLimitsByLimitId?.["another-alias"], {
+          normalModelSlug: "gpt-6-sol",
+          primary: { usedPercent: 0 },
+        });
       });
 
       it("fills missing capabilities from the previous provider snapshot", () => {
@@ -2469,6 +2522,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             seenHeaders.push(init?.headers as Record<string, string>);
             return Response.json({
               plan_type: "pro",
+              normal_model_slug: null,
+              rate_limit_reached_type: { kind: "workspace_owner_usage_limit_reached" },
               rate_limit: {
                 primary_window: {
                   used_percent: 25,
@@ -2486,12 +2541,14 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                 unlimited: false,
                 balance: "9.99",
               },
-              spend_control_reached: true,
-              individual_limit: {
-                limit: "100.00",
-                remaining_percent: 0,
-                resets_at: 1_780_200_000,
-                used: "100.00",
+              spend_control: {
+                reached: true,
+                individual_limit: {
+                  limit: "100.00",
+                  remaining_percent: 0,
+                  reset_at: 1_780_200_000,
+                  used: "100.00",
+                },
               },
               rate_limit_reset_credits: {
                 available_count: 2,
@@ -2511,6 +2568,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                 {
                   limit_name: "Spark",
                   metered_feature: "codex_bengalfox",
+                  normal_model_slug: "gpt-5.6-luna",
+                  credits: { has_credits: false, unlimited: false, balance: "0" },
+                  rate_limit_reached_type: "workspace_member_credits_depleted",
                   rate_limit: {
                     primary_window: {
                       used_percent: 10,
@@ -2518,6 +2578,24 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                       reset_at: 1_780_000_100,
                     },
                   },
+                },
+                {
+                  limitName: "Unavailable quota metadata",
+                  meteredFeature: "unavailable",
+                  normalModelSlug: null,
+                  credits: null,
+                  rateLimitReachedType: null,
+                  rateLimit: { primary: { usedPercent: 0 } },
+                },
+                {
+                  limit_name: "Omitted quota metadata",
+                  metered_feature: "omitted",
+                  rate_limit: { primary_window: { used_percent: 0 } },
+                },
+                {
+                  limit_name: "Literal record key",
+                  metered_feature: "__proto__",
+                  normal_model_slug: "gpt-6-sol",
                 },
               ],
             });
@@ -2542,6 +2620,16 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           assert.strictEqual(seenHeaders[0]?.["ChatGPT-Account-ID"], "account-id");
           assert.strictEqual(seenHeaders[0]?.["X-OpenAI-Fedramp"], "true");
           assert.strictEqual(status.accountRateLimits?.rateLimits.planType, "pro");
+          assert.strictEqual(status.accountRateLimits?.rateLimits.normalModelSlug, null);
+          assert.strictEqual(
+            status.accountRateLimits?.rateLimits.rateLimitReachedType,
+            "workspace_owner_usage_limit_reached",
+          );
+          assert.deepStrictEqual(status.accountRateLimits?.rateLimits.credits, {
+            hasCredits: true,
+            unlimited: false,
+            balance: "9.99",
+          });
           assert.strictEqual(status.auth.label, "ChatGPT Pro (More) Subscription");
           assert.strictEqual(status.accountRateLimits?.rateLimits.primary?.windowDurationMins, 300);
           assert.strictEqual(status.accountRateLimits?.rateLimits.secondary?.usedPercent, 75);
@@ -2569,11 +2657,237 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               ?.windowDurationMins,
             60,
           );
+          assert.strictEqual(
+            status.accountRateLimits?.rateLimitsByLimitId?.codex_bengalfox?.normalModelSlug,
+            "gpt-5.6-luna",
+          );
+          assert.deepStrictEqual(
+            status.accountRateLimits?.rateLimitsByLimitId?.codex_bengalfox?.credits,
+            {
+              hasCredits: false,
+              unlimited: false,
+              balance: "0",
+            },
+          );
+          assert.strictEqual(
+            status.accountRateLimits?.rateLimitsByLimitId?.codex_bengalfox?.rateLimitReachedType,
+            "workspace_member_credits_depleted",
+          );
+          assert.deepStrictEqual(status.accountRateLimits?.rateLimitsByLimitId?.unavailable, {
+            limitId: "unavailable",
+            limitName: "Unavailable quota metadata",
+            normalModelSlug: null,
+            credits: null,
+            rateLimitReachedType: null,
+            planType: "pro",
+            primary: { usedPercent: 0 },
+          });
+          assert.deepStrictEqual(status.accountRateLimits?.rateLimitsByLimitId?.omitted, {
+            limitId: "omitted",
+            limitName: "Omitted quota metadata",
+            planType: "pro",
+            primary: { usedPercent: 0 },
+          });
+          const namedQuotas = status.accountRateLimits?.rateLimitsByLimitId;
+          assert.ok(namedQuotas);
+          assert.strictEqual(Object.hasOwn(namedQuotas, "__proto__"), true);
+          assert.strictEqual(Object.getPrototypeOf(namedQuotas), Object.prototype);
+          assert.deepStrictEqual(namedQuotas["__proto__"], {
+            limitId: "__proto__",
+            limitName: "Literal record key",
+            normalModelSlug: "gpt-6-sol",
+            planType: "pro",
+          });
           const encodedStatus = encodeUnknownJsonString(status);
           assert.strictEqual(encodedStatus.includes("access-token"), false);
           assert.strictEqual(encodedStatus.includes("refresh-token"), false);
           assert.strictEqual(encodedStatus.includes("account-id"), false);
         }),
+      );
+
+      it.effect(
+        "preserves nested WHAM spend controls without borrowing legacy or other bucket values",
+        () =>
+          Effect.gen(function* () {
+            const fileSystem = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const homePath = yield* fileSystem.makeTempDirectoryScoped({
+              prefix: "cafecode-codex-spend-control-",
+            });
+            const authPath = path.join(homePath, "auth.json");
+            yield* fileSystem.writeFileString(
+              authPath,
+              encodeUnknownJsonString({
+                auth_mode: "chatgpt",
+                tokens: { access_token: "synthetic-spend-control-token" },
+              }),
+            );
+            yield* fileSystem.chmod(authPath, 0o600);
+            const originalFetch = globalThis.fetch;
+            yield* Effect.addFinalizer(() =>
+              Effect.sync(() => {
+                globalThis.fetch = originalFetch;
+              }),
+            );
+
+            const nativeLimit = {
+              limit: "100.00",
+              used: "0",
+              remaining_percent: 0,
+              reset_at: 0,
+              // Only supported metadata may leave this HTTP boundary.
+              private_extension: "must-not-survive",
+            };
+            const expectedLimit = {
+              limit: "100.00",
+              used: "0",
+              remainingPercent: 0,
+              resetsAt: 0,
+            };
+            const legacyLimit = {
+              limit: "100.00",
+              used: "0",
+              remaining_percent: 0,
+              resets_at: 0,
+            };
+            const cases = [
+              {
+                label: "native false and zero override flattened values",
+                payload: {
+                  spend_control: { reached: false, individual_limit: nativeLimit },
+                  spend_control_reached: true,
+                  individual_limit: null,
+                },
+                expected: { spendControlReached: false, individualLimit: expectedLimit },
+              },
+              {
+                label: "null native container overrides stale flattened fields",
+                payload: {
+                  spend_control: null,
+                  spend_control_reached: true,
+                  individual_limit: legacyLimit,
+                  spendControl: { reached: true, individualLimit: legacyLimit },
+                },
+                expected: { spendControlReached: null, individualLimit: null },
+              },
+              {
+                label: "null native fields never fall through to legacy spellings",
+                payload: {
+                  spend_control: {
+                    reached: null,
+                    individual_limit: null,
+                    individualLimit: legacyLimit,
+                  },
+                  spend_control_reached: true,
+                  individual_limit: legacyLimit,
+                },
+                expected: { spendControlReached: null, individualLimit: null },
+              },
+              {
+                label: "legacy flattened snake case remains compatible",
+                payload: { spend_control_reached: false, individual_limit: legacyLimit },
+                expected: { spendControlReached: false, individualLimit: expectedLimit },
+              },
+              {
+                label: "legacy flattened camel case remains compatible",
+                payload: { spendControlReached: false, individualLimit: expectedLimit },
+                expected: { spendControlReached: false, individualLimit: expectedLimit },
+              },
+              {
+                label: "legacy rate-limit-local fields remain compatible",
+                payload: {
+                  rate_limit: { spend_control_reached: false, individual_limit: legacyLimit },
+                },
+                expected: { spendControlReached: false, individualLimit: expectedLimit },
+              },
+              {
+                label: "flattened null overrides legacy rate-limit-local fields",
+                payload: {
+                  spend_control_reached: null,
+                  spendControlReached: true,
+                  individual_limit: null,
+                  individualLimit: legacyLimit,
+                  rate_limit: { spend_control_reached: true, individual_limit: legacyLimit },
+                },
+                expected: { spendControlReached: null, individualLimit: null },
+              },
+              {
+                label: "malformed native container does not revive legacy values",
+                payload: {
+                  spend_control: [],
+                  spend_control_reached: true,
+                  individual_limit: legacyLimit,
+                },
+                expected: {},
+              },
+              {
+                label: "missing native fields do not revive legacy values",
+                payload: {
+                  spend_control: {},
+                  spend_control_reached: true,
+                  individual_limit: legacyLimit,
+                },
+                expected: {},
+              },
+              ...[
+                { remaining_percent: "0" },
+                { remaining_percent: null, remainingPercent: 20 },
+                { reset_at: null, resets_at: 20 },
+                { reset_at: -1 },
+                { reset_at: 0.5 },
+                { reset_at: Number.MAX_SAFE_INTEGER + 1 },
+                { limit: "x".repeat(257) },
+                { used: "" },
+              ].map((invalidLimit) => ({
+                label: `reject malformed spend limit ${encodeUnknownJsonString(invalidLimit)}`,
+                payload: {
+                  spend_control: {
+                    reached: "false",
+                    individual_limit: { ...nativeLimit, ...invalidLimit },
+                  },
+                },
+                expected: {},
+              })),
+            ];
+            const checkedAt = "2026-09-29T00:00:00.000Z";
+            for (const testCase of cases) {
+              globalThis.fetch = (async () =>
+                Response.json({
+                  ...testCase.payload,
+                  additional_rate_limits: [
+                    { metered_feature: "unspecified" },
+                    {
+                      metered_feature: "explicit",
+                      spend_control: { reached: false, individual_limit: nativeLimit },
+                    },
+                  ],
+                })) as typeof fetch;
+              const usage = yield* readCodexAccountRateLimits(
+                decodeCodexSettings({ homePath }),
+                {},
+                checkedAt,
+              );
+              assert.deepStrictEqual(
+                usage?.rateLimits,
+                { limitId: "codex", ...testCase.expected },
+                testCase.label,
+              );
+              assert.deepStrictEqual(
+                usage?.rateLimitsByLimitId?.unspecified,
+                { limitId: "unspecified" },
+                testCase.label,
+              );
+              assert.deepStrictEqual(
+                usage?.rateLimitsByLimitId?.explicit,
+                {
+                  limitId: "explicit",
+                  spendControlReached: false,
+                  individualLimit: expectedLimit,
+                },
+                testCase.label,
+              );
+            }
+          }),
       );
 
       it.effect("ignores Codex auth metadata when the auth file is a symlink", () =>

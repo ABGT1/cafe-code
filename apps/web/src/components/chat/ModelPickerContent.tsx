@@ -23,6 +23,7 @@ import { cn } from "~/lib/utils";
 import { TooltipProvider } from "../ui/tooltip";
 import type { ProviderInstanceEntry } from "../../providerInstances";
 import { providerModelKey, sortProviderModelItems } from "../../modelOrdering";
+import { useChatPane } from "../../chatPaneContext";
 
 type ModelPickerItem = {
   slug: string;
@@ -82,6 +83,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
   onRequestClose?: () => void;
   onInstanceModelChange: (instanceId: ProviderInstanceId, model: string) => void;
 }) {
+  const pane = useChatPane();
   const {
     keybindings: providedKeybindings,
     modelOptionsByInstance,
@@ -439,6 +441,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
 
   useEffect(() => {
     const onWindowKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (!pane.active || !pane.visible) return;
       if (event.defaultPrevented || event.repeat) {
         return;
       }
@@ -467,7 +470,14 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     return () => {
       window.removeEventListener("keydown", onWindowKeyDown, true);
     };
-  }, [handleModelSelect, keybindings, modelJumpModelKeys, modelJumpShortcutContext]);
+  }, [
+    handleModelSelect,
+    keybindings,
+    modelJumpModelKeys,
+    modelJumpShortcutContext,
+    pane.active,
+    pane.visible,
+  ]);
 
   useLayoutEffect(() => {
     const listRegion = listRegionRef.current;

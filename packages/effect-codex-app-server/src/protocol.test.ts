@@ -39,6 +39,16 @@ const decodeAccountResponse = Schema.decodeUnknownSync(
   CodexSchema.CLIENT_REQUEST_RESPONSES["account/read"],
 );
 const isErrorNotification = Schema.is(CodexSchema.V2ErrorNotification);
+const decodeMcpServerStatusParams = Schema.decodeUnknownSync(
+  CodexSchema.CLIENT_REQUEST_PARAMS["mcpServerStatus/list"],
+);
+const isMcpServerStatusParams = Schema.is(
+  CodexSchema.CLIENT_REQUEST_PARAMS["mcpServerStatus/list"],
+);
+const decodeThreadItemsListParams = Schema.decodeUnknownSync(
+  CodexSchema.CLIENT_REQUEST_PARAMS["thread/items/list"],
+);
+const isThreadItemsListParams = Schema.is(CodexSchema.CLIENT_REQUEST_PARAMS["thread/items/list"]);
 
 it("preserves Codex 0.158 Pro Max account and rate-limit metadata", () => {
   const account = {
@@ -104,6 +114,94 @@ it("decodes Codex 0.158 Flex capacity failures without losing terminal notificat
     }),
     false,
   );
+});
+
+it("decodes Codex 0.159 denial failures and preserves the provider's retry decision", () => {
+  const error = {
+    message: "Too many tool calls were denied.",
+    codexErrorInfo: "tooManyDenials",
+    additionalDetails: null,
+    misalignment: null,
+  } as const;
+
+  // This classification is terminal when Codex says it is. Decode the exact
+  // upstream discriminator without broadening the error enum or substituting
+  // a retry policy that could repeat a denied action.
+  for (const willRetry of [false, true]) {
+    const failed = {
+      method: "error",
+      params: { threadId: "thread-1", turnId: "turn-1", willRetry, error },
+    } as const;
+    assert.deepEqual(decodeServerNotification(failed), failed);
+  }
+  // 0.159 also documents errors on interrupted turns. Preserve that terminal
+  // status verbatim instead of assuming any error means `failed`.
+  for (const status of ["failed", "interrupted"] as const) {
+    const completed = {
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turn: {
+          id: "turn-1",
+          items: [],
+          itemsView: "full",
+          status,
+          error,
+          startedAt: null,
+          completedAt: null,
+          durationMs: null,
+        },
+      },
+    } as const;
+    assert.deepEqual(decodeServerNotification(completed), completed);
+  }
+  assert.equal(
+    isErrorNotification({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      willRetry: false,
+      error: { ...error, codexErrorInfo: "too-many-denials" },
+    }),
+    false,
+  );
+});
+
+it("preserves Codex 0.159 optional MCP status server filtering", () => {
+  // Exercise the RPC parameter map, not only the standalone definition: a
+  // generator regression must not silently strip the server-scoping request.
+  // Omission still preserves the existing all-server discovery behavior.
+  const legacy = { detail: "toolsAndAuthOnly", threadId: "thread-1" } as const;
+  assert.deepEqual(decodeMcpServerStatusParams(legacy), legacy);
+  for (const serverName of ["example-server", null]) {
+    const params = { ...legacy, serverName };
+    assert.deepEqual(decodeMcpServerStatusParams(params), params);
+  }
+  assert.equal(isMcpServerStatusParams({ ...legacy, serverName: 42 }), false);
+});
+
+it("preserves Codex 0.159 item anchors and existing thread item cursors", () => {
+  const base = { threadId: "thread-1", turnId: "turn-1", sortDirection: "desc" } as const;
+  for (const cursor of ["opaque-continuation", { type: "item", itemId: "item-1" }, null] as const) {
+    const params = { ...base, cursor };
+    assert.deepEqual(decodeThreadItemsListParams(params), params);
+  }
+  assert.deepEqual(decodeThreadItemsListParams({ threadId: "thread-1" }), {
+    threadId: "thread-1",
+  });
+
+  // Upstream documents the non-empty turnId requirement as a server-validated
+  // relationship, not a JSON-schema refinement. Keep this generated-boundary
+  // test focused on the declared anchor shape; Cafe does not yet send anchors.
+  for (const cursor of [
+    { type: "item" },
+    { type: "item", itemId: 42 },
+    { type: "turn", itemId: "item-1" },
+    {},
+    [],
+    42,
+  ]) {
+    assert.equal(isThreadItemsListParams({ ...base, cursor }), false);
+  }
 });
 
 it("keeps Codex 0.157 gateway login capability opt-in and its responses typed", () => {

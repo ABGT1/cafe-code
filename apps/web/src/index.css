@@ -404,7 +404,13 @@ body::after {
   opacity: 1;
 }
 
+/* Desk actions are sibling buttons. Treat their parent as the hover surface,
+   with matching specificity so the selected row's shadow still takes priority. */
 .dark .cafe-thread-sidebar [data-slot="sidebar-menu-button"]:hover,
+.dark
+  .cafe-thread-sidebar
+  [data-desk-chat-row]:hover
+  > :where([data-slot="sidebar-menu-sub-button"]),
 .dark .cafe-thread-sidebar [data-slot="sidebar-menu-sub-button"]:hover {
   background-color: rgba(255, 255, 255, 0.065);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.025);
@@ -420,6 +426,10 @@ body::after {
 }
 
 .dark .cafe-thread-sidebar [data-slot="sidebar-menu-button"][data-active="true"]:hover,
+.dark
+  .cafe-thread-sidebar
+  [data-desk-chat-row]:hover
+  > :where([data-slot="sidebar-menu-sub-button"])[data-active="true"],
 .dark .cafe-thread-sidebar [data-slot="sidebar-menu-sub-button"][data-active="true"]:hover {
   background:
     linear-gradient(90deg, rgba(72, 207, 255, 0.1), transparent 62%), rgba(255, 255, 255, 0.09);

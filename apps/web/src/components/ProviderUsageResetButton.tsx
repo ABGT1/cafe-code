@@ -7,9 +7,10 @@ import type {
 } from "@cafecode/contracts";
 import { hasLowCodexUsage } from "@cafecode/shared/providerUsageReset";
 import {
-  formatCodexRateLimitSummary,
+  formatCodexRateLimitPresentation,
   selectCodexAvailableResetCount,
 } from "../lib/codexRateLimits";
+import { ProviderAccountQuotaDetails } from "./ProviderAccountQuotaDetails";
 import { Button } from "./ui/button";
 import {
   Dialog,
@@ -134,7 +135,7 @@ export function ProviderUsageResetButton(props: {
   };
 
   const count = result?.rateLimits?.rateLimitResetCredits?.availableCount;
-  const summary = formatCodexRateLimitSummary(result?.rateLimits);
+  const quota = formatCodexRateLimitPresentation(result?.rateLimits);
   const finished = result?.outcome != null;
   const canRedeem = Boolean(result?.confirmationId && !finished);
 
@@ -186,23 +187,16 @@ export function ProviderUsageResetButton(props: {
             {result && !busy ? (
               <>
                 <div className="space-y-1 rounded-lg border bg-muted/30 p-3">
+                  {quota ? (
+                    <ProviderAccountQuotaDetails
+                      presentation={{ ...quota, resetAvailability: null }}
+                    />
+                  ) : null}
                   <p className="font-medium">
                     {count === undefined
                       ? "Reset availability unavailable"
                       : `${count} usage limit ${count === 1 ? "reset" : "resets"} available`}
                   </p>
-                  {summary?.primary ? (
-                    <p className="text-muted-foreground">{summary.primary.text}</p>
-                  ) : null}
-                  {summary?.secondary ? (
-                    <p className="text-muted-foreground">{summary.secondary.text}</p>
-                  ) : null}
-                  {summary?.primaryReset ? (
-                    <p className="text-xs text-muted-foreground">{summary.primaryReset}</p>
-                  ) : null}
-                  {summary?.weeklyReset ? (
-                    <p className="text-xs text-muted-foreground">{summary.weeklyReset}</p>
-                  ) : null}
                 </div>
                 {!finished && !result.retrying && canRedeem ? (
                   <p>

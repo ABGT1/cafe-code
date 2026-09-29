@@ -12,6 +12,8 @@ import { useThreadSelectionStore } from "../threadSelectionStore";
 import { resolveSidebarNewThreadEnvMode } from "~/components/Sidebar.logic";
 import { useSettings } from "~/hooks/useSettings";
 import { useServerKeybindings } from "~/rpc/serverState";
+import DeskWorkspace from "../components/desk/DeskWorkspace";
+import { ChatPaneRuntimeProvider } from "../chatPaneContext";
 
 function ChatRouteGlobalShortcuts() {
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
@@ -88,10 +90,11 @@ function ChatRouteGlobalShortcuts() {
 
 function ChatRouteLayout() {
   return (
-    <>
+    <ChatPaneRuntimeProvider>
       <ChatRouteGlobalShortcuts />
       <Outlet />
-    </>
+      <DeskWorkspace />
+    </ChatPaneRuntimeProvider>
   );
 }
 

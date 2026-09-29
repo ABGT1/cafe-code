@@ -152,4 +152,59 @@ describe("SessionRail", () => {
       host.remove();
     }
   });
+
+  it("keeps many quota buckets scrollable inside a short rail with reset availability below them", async () => {
+    await page.viewport(1100, 800);
+    const host = document.createElement("div");
+    host.style.cssText =
+      "display:flex; flex-direction:column; width:280px; height:280px; overflow:hidden";
+    document.body.append(host);
+    const screen = await render(
+      <SessionRail
+        plan={{ steps: [{ step: "Still visible task", status: "inProgress" }] }}
+        usage={makeUsage()}
+        rateLimits={{
+          checkedAt: "2026-09-29T00:00:00.000Z",
+          rateLimits: {},
+          rateLimitsByLimitId: Object.fromEntries(
+            Array.from({ length: 8 }, (_, index) => [
+              `quota-${index}`,
+              {
+                limitName: `Quota ${index}`,
+                primary: { usedPercent: index, windowDurationMins: 300, resetsAt: 1_788_278_880 },
+                credits: { hasCredits: true, unlimited: false, balance: "25" },
+              },
+            ]),
+          ),
+          rateLimitResetCredits: { availableCount: 2 },
+        }}
+        onShowInComposer={vi.fn()}
+      />,
+      { container: host },
+    );
+    try {
+      const rail = host.querySelector<HTMLElement>("[data-session-rail]")!;
+      const usage = host.querySelector<HTMLElement>("[data-session-rail-usage]")!;
+      const quotaScroll = host.querySelector<HTMLElement>("[data-account-quota-scroll]")!;
+      const count = page.getByText("Usage limit resets available: 2", { exact: true }).element();
+      expect(usage.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+        rail.getBoundingClientRect().bottom + 1,
+      );
+      expect(count.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+        rail.getBoundingClientRect().bottom,
+      );
+      expect(quotaScroll.clientHeight).toBeGreaterThan(0);
+      expect(quotaScroll.scrollHeight).toBeGreaterThan(quotaScroll.clientHeight);
+      expect(quotaScroll.contains(count)).toBe(false);
+      const countTop = count.getBoundingClientRect().top;
+      quotaScroll.scrollTop = quotaScroll.scrollHeight;
+      expect(count.getBoundingClientRect().top).toBe(countTop);
+      expect(host.querySelectorAll("[data-account-quota-bucket]")).toHaveLength(8);
+      expect(getComputedStyle(quotaScroll).overflowY).toBe("auto");
+      expect(host.scrollHeight).toBeLessThanOrEqual(host.clientHeight + 1);
+    } finally {
+      await screen.unmount();
+      host.remove();
+    }
+  });
 });

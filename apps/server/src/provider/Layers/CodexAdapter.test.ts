@@ -2617,11 +2617,17 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
   );
 
   for (const failure of [
-    { code: "serverOverloaded", message: "Selected model is at capacity" },
-    { code: "flexUnavailable", message: "Flex capacity is temporarily unavailable" },
+    { code: "serverOverloaded", message: "Selected model is at capacity", status: "failed" },
+    {
+      code: "flexUnavailable",
+      message: "Flex capacity is temporarily unavailable",
+      status: "failed",
+    },
+    { code: "tooManyDenials", message: "Too many tool calls were denied", status: "failed" },
+    { code: "tooManyDenials", message: "Too many tool calls were denied", status: "interrupted" },
   ] as const) {
     it.effect(
-      `preserves a ${failure.code} root failure while later child work stays observable`,
+      `preserves a ${failure.code} ${failure.status} root turn while later child work stays observable`,
       () =>
         Effect.gen(function* () {
           const { adapter, runtime } = yield* startLifecycleRuntime();
@@ -2641,7 +2647,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
               threadId: "provider-thread-1",
               turn: {
                 id: "turn-parent",
-                status: "failed",
+                status: failure.status,
                 items: [],
                 itemsView: "notLoaded",
                 error: {
@@ -2681,7 +2687,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
           const terminal = events[0];
           assert.equal(
             terminal?.type === "turn.completed" ? terminal.payload.state : undefined,
-            "failed",
+            failure.status,
           );
           assert.equal(
             terminal?.type === "turn.completed" ? terminal.payload.errorMessage : undefined,
@@ -2693,6 +2699,11 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
             "provider-child",
           );
           assert.equal(child?.turnId, "turn-parent");
+          // A new failure classification must never turn failed provider work
+          // into a resubmission, including repeated actions that were denied.
+          assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+          assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+          assert.equal(runtime.respondToRequestImpl.mock.calls.length, 0);
         }),
     );
   }
@@ -2782,6 +2793,120 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         ],
       );
     }),
+  );
+
+  it.effect(
+    "normalizes future account plans in replay events without retaining untyped metadata",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const eventsFiber = yield* Stream.take(adapter.streamEvents, 2).pipe(
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        // These events bypass the app-server client's compatibility decoder, as
+        // persisted or older-runtime events can. The adapter must independently
+        // normalize only plan metadata, then retain the schema-decoded payload
+        // in both its canonical event and diagnostics.
+        yield* runtime.emit({
+          id: asEventId("evt-future-plan-account"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-09-29T00:00:00.000Z",
+          method: "account/updated",
+          threadId: asThreadId("thread-1"),
+          payload: {
+            authMode: "chatgpt",
+            planType: "future_plan",
+            unexpectedMetadata: "ACCOUNT_METADATA_SENTINEL",
+          },
+        } satisfies ProviderEvent);
+        yield* runtime.emit({
+          id: asEventId("evt-future-plan-quota"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-09-29T00:00:01.000Z",
+          method: "account/rateLimits/updated",
+          threadId: asThreadId("thread-1"),
+          payload: {
+            unexpectedMetadata: "QUOTA_ENVELOPE_SENTINEL",
+            rateLimits: {
+              planType: "future_plan",
+              limitId: "codex",
+              unexpectedMetadata: "QUOTA_METADATA_SENTINEL",
+              primary: {
+                usedPercent: 23,
+                windowDurationMins: 300,
+                resetsAt: 1_790_636_400,
+                unexpectedMetadata: "WINDOW_METADATA_SENTINEL",
+              },
+            },
+          },
+        } satisfies ProviderEvent);
+
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        const account = events[0];
+        const quota = events[1];
+        assert.equal(account?.type, "account.updated");
+        assert.equal(quota?.type, "account.rate-limits.updated");
+        if (account?.type !== "account.updated" || quota?.type !== "account.rate-limits.updated")
+          return;
+        const expectedAccount = { authMode: "chatgpt", planType: "unknown" };
+        const expectedQuota = {
+          rateLimits: {
+            planType: "unknown",
+            limitId: "codex",
+            primary: { usedPercent: 23, windowDurationMins: 300, resetsAt: 1_790_636_400 },
+          },
+        };
+        assert.deepEqual(account.payload.account, expectedAccount);
+        assert.deepEqual(account.raw?.payload, expectedAccount);
+        assert.deepEqual(quota.payload.rateLimits, expectedQuota);
+        assert.deepEqual(quota.raw?.payload, expectedQuota);
+        assert.doesNotMatch(JSON.stringify(events), /SENTINEL|future_plan/);
+      }),
+  );
+
+  it.effect(
+    "rejects malformed account and quota events even when their plan can be normalized",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+        for (const [method, payload] of [
+          ["account/updated", { authMode: "invalid_auth_mode", planType: "future_plan" }],
+          [
+            "account/rateLimits/updated",
+            { rateLimits: { planType: "future_plan", primary: { usedPercent: "23" } } },
+          ],
+        ] as const) {
+          yield* runtime.emit({
+            id: asEventId(`evt-malformed-${method}`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            createdAt: "2026-09-29T00:00:00.000Z",
+            method,
+            threadId: asThreadId("thread-1"),
+            payload,
+          } satisfies ProviderEvent);
+        }
+        // A later valid notification is an ordering barrier: seeing it first
+        // proves both malformed predecessors were rejected without a timed wait.
+        yield* runtime.emit({
+          id: asEventId("evt-after-malformed-account-events"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-09-29T00:00:01.000Z",
+          method: "warning",
+          threadId: asThreadId("thread-1"),
+          payload: { message: "Account schema validation barrier" },
+        } satisfies ProviderEvent);
+        const firstEvent = yield* Fiber.join(firstEventFiber);
+        assert.equal(firstEvent._tag, "Some");
+        if (firstEvent._tag !== "Some") return;
+        assert.equal(firstEvent.value.type, "runtime.warning");
+        assert.equal(firstEvent.value.eventId, "evt-after-malformed-account-events");
+      }),
   );
 
   it.effect("maps each Codex task-list update as one complete turn-scoped snapshot", () =>
@@ -3041,6 +3166,55 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         assert.equal(firstEvent.value.payload.message, "Flex capacity is temporarily unavailable");
       }),
   );
+
+  for (const willRetry of [false, true]) {
+    it.effect(`preserves the provider's tooManyDenials willRetry=${willRetry} decision`, () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+        // Denial exhaustion is a provider failure, not permission to replay a
+        // turn or bypass approvals. Only Codex's explicit willRetry flag decides
+        // whether this notification is a warning while its existing turn runs.
+        yield* runtime.emit({
+          id: asEventId("evt-denials-error"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          createdAt: "2026-09-29T00:00:00.000Z",
+          method: "error",
+          turnId: asTurnId("turn-1"),
+          payload: {
+            threadId: "provider-thread-1",
+            turnId: "turn-1",
+            error: {
+              message: "Too many tool calls were denied",
+              codexErrorInfo: "tooManyDenials",
+              additionalDetails: null,
+            },
+            willRetry,
+          },
+        } satisfies ProviderEvent);
+
+        const firstEvent = yield* Fiber.join(firstEventFiber);
+        assert.equal(firstEvent._tag, "Some");
+        if (firstEvent._tag !== "Some") return;
+        assert.equal(firstEvent.value.type, willRetry ? "runtime.warning" : "runtime.error");
+        if (
+          firstEvent.value.type !== "runtime.warning" &&
+          firstEvent.value.type !== "runtime.error"
+        )
+          return;
+        assert.equal(firstEvent.value.turnId, "turn-1");
+        assert.equal(firstEvent.value.payload.message, "Too many tool calls were denied");
+        if (firstEvent.value.type === "runtime.error") {
+          assert.equal(firstEvent.value.payload.class, "provider_error");
+        }
+        assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.steerTurnImpl.mock.calls.length, 0);
+        assert.equal(runtime.respondToRequestImpl.mock.calls.length, 0);
+      }),
+    );
+  }
 
   it.effect("maps terminal Codex subagent errors to work-log warnings", () =>
     Effect.gen(function* () {

@@ -5,6 +5,9 @@ import {
   formatCodexRateLimitResetAvailability,
   formatCodexRateLimitInlineText,
   formatCodexRateLimitSummary,
+  formatCodexRateLimitBuckets,
+  formatCodexRateLimitPresentation,
+  selectCodexRateLimitBuckets,
   selectCodexRateLimitSnapshot,
   shouldSurfaceProviderAccountRateLimits,
 } from "./codexRateLimits";
@@ -54,7 +57,7 @@ describe("codexRateLimits", () => {
     expect(snapshot?.primary?.usedPercent).toBe(20);
   });
 
-  it("formats primary hours, secondary days, left percentages, and local weekly reset", () => {
+  it("formats primary hours, secondary days, left percentages, and local reset times", () => {
     const summary = formatCodexRateLimitSummary(
       {
         checkedAt: "2026-05-28T00:00:00.000Z",
@@ -79,8 +82,8 @@ describe("codexRateLimits", () => {
     expect(summary?.secondary?.text).toBe("Secondary window (7 days): 37.5% left");
     expect(summary?.primaryReset).toContain("5h reset:");
     expect(summary?.primaryReset).toContain("2026");
-    expect(summary?.weeklyReset).toContain("Weekly reset:");
-    expect(summary?.weeklyReset).toContain("2026");
+    expect(summary?.secondaryReset).toContain("7d reset:");
+    expect(summary?.secondaryReset).toContain("2026");
   });
 
   it("formats both window durations as exact days, hours, and minutes", () => {
@@ -145,7 +148,7 @@ describe("codexRateLimits", () => {
     expect(summary?.primaryReset).toContain("5h reset:");
     // No weekly window was reported, so it must not appear at all.
     expect(summary?.secondary).toBeNull();
-    expect(summary?.weeklyReset).toBeNull();
+    expect(summary?.secondaryReset).toBeNull();
   });
 
   it("returns null when there is no rate-limit information at all", () => {
@@ -203,5 +206,135 @@ describe("codexRateLimits", () => {
     );
 
     expect(text).toBe("Primary window (5 hours): 0% left · Secondary window (7 days): 100% left");
+  });
+
+  it("keeps every named bucket and deduplicates only the represented legacy identity", () => {
+    const input = {
+      checkedAt: "2026-09-29T00:00:00.000Z",
+      rateLimits: { limitId: "codex", primary: { usedPercent: 99 } },
+      rateLimitsByLimitId: {
+        research: { limitName: "Research quota", primary: { usedPercent: 25 } },
+        codex: { limitId: "codex", primary: { usedPercent: 25 } },
+        other: { limitName: "Other quota", primary: { usedPercent: 25 } },
+      },
+    };
+    const buckets = formatCodexRateLimitBuckets(input);
+    expect(buckets.map((bucket) => bucket.id)).toEqual(["codex", "research", "other"]);
+    expect(buckets.map((bucket) => bucket.primary?.value)).toEqual([
+      "75% left",
+      "75% left",
+      "75% left",
+    ]);
+    expect(buckets[1]?.label).toBe("Research quota");
+    expect(
+      selectCodexRateLimitBuckets({
+        ...input,
+        rateLimits: { limitId: "legacy-only", primary: { usedPercent: 10 } },
+      }).map((bucket) => bucket.id),
+    ).toContain("legacy-only");
+    expect(formatCodexRateLimitInlineText(input)).toContain(
+      "Research quota: Primary window: 75% left",
+    );
+  });
+
+  it("shows named-only bucket data when the backward-compatible view is empty", () => {
+    const presentation = formatCodexRateLimitPresentation({
+      checkedAt: "2026-09-29T00:00:00.000Z",
+      rateLimits: {},
+      rateLimitsByLimitId: { unfamiliar: { primary: { usedPercent: 100 } } },
+      rateLimitResetCredits: { availableCount: 0 },
+    });
+    expect(presentation?.buckets).toHaveLength(1);
+    expect(presentation?.buckets[0]?.label).toBe("unfamiliar");
+    expect(presentation?.buckets[0]?.primary?.value).toBe("0% left");
+    expect(presentation?.resetAvailability).toBe("Usage limit resets available: 0");
+  });
+
+  it.each([
+    { credits: null, expected: null },
+    {
+      credits: { hasCredits: true, unlimited: true, balance: null },
+      expected: ["Credits: Unlimited"],
+    },
+    {
+      credits: { hasCredits: false, unlimited: false, balance: "0" },
+      expected: ["Credits: None available", "Credit balance: 0"],
+    },
+    {
+      credits: { hasCredits: true, unlimited: false, balance: null },
+      expected: ["Credits: Available (balance not reported)"],
+    },
+    {
+      credits: { hasCredits: true, unlimited: false, balance: "9007199254740993.0001" },
+      expected: ["Credits: Available", "Credit balance: 9007199254740993.0001"],
+    },
+  ])(
+    "preserves credits-only availability, nulls and decimal balances: $credits",
+    ({ credits, expected }) => {
+      const summary = formatCodexRateLimitSummary({
+        checkedAt: "2026-09-29T00:00:00.000Z",
+        rateLimits: { credits },
+      });
+      expect(summary ? summary.details.map((line) => line.text) : null).toEqual(expected);
+    },
+  );
+
+  it("shows individual spend amounts, zero remaining and provider-classified exhaustion", () => {
+    const summary = formatCodexRateLimitSummary(
+      {
+        checkedAt: "2026-09-29T00:00:00.000Z",
+        rateLimits: {
+          individualLimit: {
+            used: "12.50",
+            limit: "12.50",
+            remainingPercent: 0,
+            resetsAt: 1_780_172_059,
+          },
+          spendControlReached: true,
+          rateLimitReachedType: "workspace_member_usage_limit_reached",
+        },
+      },
+      { locale: "en-US", timeZone: "UTC" },
+    );
+    expect(summary?.details.map((line) => line.text)).toEqual([
+      "Individual spend limit: 12.50 used of 12.50",
+      "Individual spend remaining: 0% left",
+      expect.stringContaining("Individual spend reset:"),
+      "Spend control: Limit reached",
+      "Limit reached: Workspace member usage limit reached",
+    ]);
+  });
+
+  it("does not interpret an unknown reason or infer exhaustion from absent fields", () => {
+    const summary = formatCodexRateLimitSummary({
+      checkedAt: "2026-09-29T00:00:00.000Z",
+      rateLimits: {
+        individualLimit: null,
+        spendControlReached: false,
+        rateLimitReachedType: "__proto__",
+      },
+    });
+    expect(summary?.details.map((line) => line.text)).toEqual([
+      "Spend control: Not reached",
+      "Limit reached: __proto__",
+    ]);
+  });
+
+  it.each([
+    [15, "15m reset:"],
+    [1_440, "1d reset:"],
+    [1_572, "1d 2h 12m reset:"],
+    [null, "Secondary reset:"],
+  ])("labels a secondary reset from its reported duration %s", (duration, expected) => {
+    const summary = formatCodexRateLimitSummary(
+      {
+        checkedAt: "2026-09-29T00:00:00.000Z",
+        rateLimits: { secondary: { windowDurationMins: duration, resetsAt: 1_780_172_059 } },
+      },
+      { locale: "en-US", timeZone: "UTC" },
+    );
+    expect(summary?.secondary).toBeNull();
+    expect(summary?.secondaryReset).toContain(expected);
+    expect(summary?.secondaryReset).not.toContain("Weekly");
   });
 });

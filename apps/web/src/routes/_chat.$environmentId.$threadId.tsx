@@ -1,13 +1,9 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useEffect, useMemo } from "react";
+import { useEffect } from "react";
 
-import ChatView from "../components/ChatView";
-import { threadHasStarted } from "../components/ChatView.logic";
-import { SidebarInset } from "~/components/ui/sidebar";
-import { finalizePromotedDraftThreadByRef, useComposerDraftStore } from "../composerDraftStore";
+import { useComposerDraftStore } from "../composerDraftStore";
 import { usePrimaryEnvironmentId } from "../environments/primary";
 import { selectEnvironmentState, selectThreadExistsByRef, useStore } from "../store";
-import { createThreadSelectorByRef } from "../storeSelectors";
 import { resolveThreadRouteRef } from "../threadRoutes";
 
 function ChatThreadRouteView() {
@@ -23,16 +19,12 @@ function ChatThreadRouteView() {
   const bootstrapComplete = useStore(
     (store) => selectEnvironmentState(store, threadRef?.environmentId ?? null).bootstrapComplete,
   );
-  const serverThread = useStore(useMemo(() => createThreadSelectorByRef(threadRef), [threadRef]));
   const threadExists = useStore((store) => selectThreadExistsByRef(store, threadRef));
   const environmentHasServerThreads = useStore(
     (store) => selectEnvironmentState(store, threadRef?.environmentId ?? null).threadIds.length > 0,
   );
   const draftThreadExists = useComposerDraftStore((store) =>
     threadRef ? store.getDraftThreadByRef(threadRef) !== null : false,
-  );
-  const draftThread = useComposerDraftStore((store) =>
-    threadRef ? store.getDraftThreadByRef(threadRef) : null,
   );
   const environmentHasDraftThreads = useComposerDraftStore((store) => {
     if (!threadRef) {
@@ -41,7 +33,6 @@ function ChatThreadRouteView() {
     return store.hasDraftThreadsInEnvironment(threadRef.environmentId);
   });
   const routeThreadExists = threadExists || draftThreadExists;
-  const serverThreadStarted = threadHasStarted(serverThread);
   const environmentHasAnyThreads = environmentHasServerThreads || environmentHasDraftThreads;
 
   useEffect(() => {
@@ -60,26 +51,9 @@ function ChatThreadRouteView() {
     }
   }, [navigate, primaryEnvironmentId, routeMatchesPrimaryEnvironment, threadRef]);
 
-  useEffect(() => {
-    if (!threadRef || !serverThreadStarted || !draftThread?.promotedTo) {
-      return;
-    }
-    finalizePromotedDraftThreadByRef(threadRef);
-  }, [draftThread?.promotedTo, serverThreadStarted, threadRef]);
-
-  if (!threadRef || !routeMatchesPrimaryEnvironment || !bootstrapComplete || !routeThreadExists) {
-    return null;
-  }
-
-  return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
-      <ChatView
-        environmentId={threadRef.environmentId}
-        threadId={threadRef.threadId}
-        routeKind="server"
-      />
-    </SidebarInset>
-  );
+  // The shared chat layout owns pane mounts and draft promotion. Route guards
+  // remain here, but navigation must not create a second view/queue dispatcher.
+  return null;
 }
 
 export const Route = createFileRoute("/_chat/$environmentId/$threadId")({

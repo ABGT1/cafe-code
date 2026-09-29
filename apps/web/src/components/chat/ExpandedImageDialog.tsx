@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useState } from "react";
 import { ChevronLeftIcon, ChevronRightIcon, XIcon } from "lucide-react";
 import { Button } from "../ui/button";
 import type { ExpandedImagePreview } from "./ExpandedImagePreview";
+import { useChatPane } from "../../chatPaneContext";
 
 interface ExpandedImageDialogProps {
   preview: ExpandedImagePreview;
@@ -12,6 +13,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
   preview: initialPreview,
   onClose,
 }: ExpandedImageDialogProps) {
+  const pane = useChatPane();
   const [preview, setPreview] = useState(initialPreview);
 
   // Sync when the parent hands us a new preview reference.
@@ -31,6 +33,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (!pane.active || !pane.visible || event.defaultPrevented) return;
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
@@ -51,7 +54,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [navigateImage, onClose, preview.images.length]);
+  }, [navigateImage, onClose, preview.images.length, pane.active, pane.visible]);
 
   const item = preview.images[preview.index];
   if (!item) return null;

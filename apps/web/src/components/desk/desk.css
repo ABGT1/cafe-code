@@ -1,0 +1,231 @@
+/* Navigation chrome only: individual chat/composer styles remain authoritative. */
+.desk-workspace {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.desk-pane {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.desk-pane > * {
+  min-height: 0;
+}
+/* Local chat overlays (for example the subagent detail panel) keep their own
+   z-order inside chat content. They must not cover the sibling drop preview;
+   isolate the content instead of escalating preview z-index above app dialogs. */
+.desk-pane > :not(.desk-drop-hint) {
+  isolation: isolate;
+}
+/* A single visible group uses the original chat's normal flex sizing. Keeping
+   that view absolutely positioned discards its intrinsic width contribution,
+   so a narrow host beside an expanded sidebar can squeeze the unchanged
+   composer below even its compact action row's minimum. Multiple visible
+   groups still use the explicit tiling rectangles; focused/narrow layouts
+   contain one pane and naturally return to this in-flow form. */
+.desk-workspace:has(> .desk-pane:only-of-type) {
+  display: flex;
+}
+.desk-workspace > .desk-pane:only-of-type {
+  position: relative;
+  flex: 1;
+  width: auto !important;
+  height: auto !important;
+}
+.desk-group-bar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: 1.9rem;
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card) 82%, transparent);
+  backdrop-filter: blur(12px);
+  font-size: 0.72rem;
+}
+.desk-icon,
+.desk-group-name,
+.desk-tab-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--muted-foreground);
+  flex: 0 0 auto;
+}
+.desk-icon {
+  width: 1.6rem;
+}
+.desk-icon:hover,
+.desk-group-name:hover,
+.desk-tab-action:hover {
+  color: var(--foreground);
+  background: var(--accent);
+}
+.desk-group-name {
+  max-width: 6rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 0.35rem;
+  border-right: 1px solid var(--border);
+}
+.desk-group-grip {
+  width: 1rem;
+  cursor: grab;
+  touch-action: none;
+}
+.desk-tab-strip {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.desk-tab-cell {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 6rem;
+  max-width: 15rem;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid transparent;
+}
+.desk-tab-cell[data-selected="true"] {
+  background: color-mix(in srgb, var(--accent) 50%, transparent);
+  border-bottom-color: var(--primary);
+}
+.desk-tab-cell[data-dragging="true"] {
+  opacity: 0.4;
+}
+.desk-tab {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  padding: 0 0.5rem;
+  color: var(--muted-foreground);
+  text-align: left;
+  touch-action: none;
+}
+.desk-tab[aria-selected="true"] {
+  color: var(--foreground);
+}
+.desk-tab-title {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.desk-tab-action {
+  width: 1.2rem;
+}
+.desk-status {
+  width: 0.3rem;
+  height: 0.3rem;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--muted-foreground);
+  opacity: 0.5;
+}
+.desk-status[data-working="true"] {
+  background: #57bfd3;
+  opacity: 1;
+}
+.desk-status[data-attention="true"] {
+  background: #e6b85c;
+  opacity: 1;
+}
+.desk-divider {
+  position: absolute;
+  z-index: 5;
+  touch-action: none;
+  outline: none;
+}
+.desk-divider[data-axis="x"] {
+  width: 5px;
+  margin-left: -2px;
+  cursor: col-resize;
+}
+.desk-divider[data-axis="y"] {
+  height: 5px;
+  margin-top: -2px;
+  cursor: row-resize;
+}
+.desk-divider:hover,
+.desk-divider:focus-visible {
+  background: color-mix(in srgb, var(--primary) 60%, transparent);
+}
+.desk-drop-hint {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 15;
+  border: 1px solid var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+}
+.desk-drop-hint[data-edge="left"] {
+  right: 50%;
+}
+.desk-drop-hint[data-edge="right"] {
+  left: 50%;
+}
+.desk-drop-hint[data-edge="top"] {
+  bottom: 50%;
+}
+.desk-drop-hint[data-edge="bottom"] {
+  top: 50%;
+}
+.desk-group-switcher {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.75rem;
+}
+.desk-group-switcher button {
+  padding: 0.25rem 0.65rem;
+  white-space: nowrap;
+  border-right: 1px solid var(--border);
+}
+.desk-group-switcher button[aria-pressed="true"] {
+  background: var(--accent);
+}
+.desk-empty-actions {
+  position: absolute;
+  bottom: 15%;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  gap: 0.5rem;
+}
+.desk-overflow-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  width: 100%;
+  padding: 0.45rem;
+  text-align: left;
+  font-size: 0.8rem;
+}
+.desk-overflow-row:hover,
+.desk-overflow-row:focus-visible {
+  background: var(--accent);
+}
+.desk-overflow-row small {
+  color: var(--muted-foreground);
+}
+.desk-group-bar button:focus-visible {
+  outline: 1px solid var(--ring);
+  outline-offset: -2px;
+}

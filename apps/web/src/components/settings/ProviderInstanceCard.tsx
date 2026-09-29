@@ -27,10 +27,10 @@ import {
 
 import { cn } from "../../lib/utils";
 import { ProviderUsageResetButton } from "../ProviderUsageResetButton";
+import { ProviderAccountQuotaDetails } from "../ProviderAccountQuotaDetails";
 import { ensureLocalApi } from "../../localApi";
 import {
-  formatCodexRateLimitResetAvailability,
-  formatCodexRateLimitSummary,
+  formatCodexRateLimitPresentation,
   shouldSurfaceProviderAccountRateLimits,
 } from "../../lib/codexRateLimits";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
@@ -753,23 +753,9 @@ export function ProviderInstanceCard({
   const authenticatedDetail = hasAuthenticatedEmail
     ? (liveProvider?.auth.label ?? liveProvider?.auth.type ?? null)
     : null;
-  const codexRateLimitSummary = shouldSurfaceProviderAccountRateLimits(liveProvider)
-    ? formatCodexRateLimitSummary(liveProvider?.accountRateLimits)
+  const accountQuota = shouldSurfaceProviderAccountRateLimits(liveProvider)
+    ? formatCodexRateLimitPresentation(liveProvider?.accountRateLimits)
     : null;
-  const codexRateLimitWindowText = codexRateLimitSummary
-    ? [codexRateLimitSummary.primary?.text, codexRateLimitSummary.secondary?.text]
-        .filter((part): part is string => Boolean(part))
-        .join(" · ")
-    : null;
-  const codexRateLimitResetText = codexRateLimitSummary
-    ? [codexRateLimitSummary.primaryReset, codexRateLimitSummary.weeklyReset]
-        .filter((part): part is string => Boolean(part))
-        .join(" · ")
-    : null;
-  const codexRateLimitResetAvailabilityText =
-    liveProvider?.driver === "codex" && liveProvider.auth.status === "authenticated"
-      ? formatCodexRateLimitResetAvailability(liveProvider.accountRateLimits)
-      : null;
   const summary = rawSummary;
   const versionLabel = getProviderVersionLabel(liveProvider?.version);
   const versionAdvisory = getProviderVersionAdvisoryPresentation(liveProvider?.versionAdvisory);
@@ -1080,22 +1066,16 @@ export function ProviderInstanceCard({
               {titleTailNode}
             </div>
             {authRowNode}
-            {codexRateLimitSummary || codexRateLimitResetAvailabilityText ? (
-              <div className="grid gap-0.5 text-xs leading-snug text-muted-foreground/80">
-                {codexRateLimitWindowText ? (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <p>Usage: {codexRateLimitWindowText}</p>
-                    <ProviderUsageResetButton
-                      provider={liveProvider}
-                      request={(input) => ensureLocalApi().server.usageReset(input)}
-                    />
-                  </div>
-                ) : null}
-                {codexRateLimitResetAvailabilityText ? (
-                  <p>{codexRateLimitResetAvailabilityText}</p>
-                ) : null}
-                {codexRateLimitResetText ? <p>{codexRateLimitResetText}</p> : null}
-              </div>
+            {accountQuota ? (
+              <ProviderAccountQuotaDetails
+                presentation={accountQuota}
+                action={
+                  <ProviderUsageResetButton
+                    provider={liveProvider}
+                    request={(input) => ensureLocalApi().server.usageReset(input)}
+                  />
+                }
+              />
             ) : null}
           </div>
           <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">

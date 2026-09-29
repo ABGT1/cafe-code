@@ -31,3 +31,6 @@ squashfs-root/
 dist-electron/
 .electron-runtime/
 .startup-profiles/
+
+# Local-only design mockups and experimental feature explorations. Never publish.
+/.explorations/

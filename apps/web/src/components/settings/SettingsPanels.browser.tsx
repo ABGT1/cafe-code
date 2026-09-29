@@ -1733,7 +1733,7 @@ describe("settings panels", () => {
     });
   });
 
-  it("shows Codex reset availability above the reset schedule", async () => {
+  it("shows every Codex quota bucket and keeps reset availability below the reset schedule", async () => {
     const codexProvider: ServerProvider = {
       ...createOutdatedProvider("codex"),
       accountRateLimits: {
@@ -1749,6 +1749,24 @@ describe("settings panels", () => {
             usedPercent: 50,
             windowDurationMins: 10_080,
             resetsAt: 1_785_549_600,
+          },
+        },
+        rateLimitsByLimitId: {
+          codex: {
+            limitId: "codex",
+            primary: { usedPercent: 25, windowDurationMins: 300, resetsAt: 1_784_944_800 },
+            secondary: { usedPercent: 50, windowDurationMins: 10_080, resetsAt: 1_785_549_600 },
+          },
+          additional: {
+            limitName: "Additional quota",
+            credits: { hasCredits: false, unlimited: false, balance: "0" },
+            individualLimit: {
+              used: "10",
+              limit: "10",
+              remainingPercent: 0,
+              resetsAt: 1_785_549_600,
+            },
+            rateLimitReachedType: "workspace_member_usage_limit_reached",
           },
         },
         rateLimitResetCredits: {
@@ -1771,17 +1789,25 @@ describe("settings panels", () => {
     await expect
       .element(page.getByText("Usage limit resets available: 2", { exact: true }))
       .toBeInTheDocument();
+    await expect.element(page.getByText("Additional quota", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Credit balance: 0", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Individual spend remaining: 0% left")).toBeVisible();
+    await expect
+      .element(page.getByText("Limit reached: Workspace member usage limit reached"))
+      .toBeVisible();
+    expect(document.querySelectorAll('[data-account-quota-bucket="codex"]')).toHaveLength(1);
     await vi.waitFor(() => {
       const lines = Array.from(document.querySelectorAll<HTMLParagraphElement>("p"));
       const availabilityIndex = lines.findIndex(
         (line) => line.textContent === "Usage limit resets available: 2",
       );
-      const resetScheduleIndex = lines.findIndex((line) =>
-        line.textContent?.includes("Weekly reset:"),
-      );
+      const resetScheduleIndex = lines.findIndex((line) => line.textContent?.includes("7d reset:"));
 
       expect(availabilityIndex).toBeGreaterThanOrEqual(0);
-      expect(resetScheduleIndex).toBeGreaterThan(availabilityIndex);
+      expect(resetScheduleIndex).toBeGreaterThanOrEqual(0);
+      expect(availabilityIndex).toBeGreaterThan(resetScheduleIndex);
+      const availability = lines[availabilityIndex]!;
+      expect(availability.parentElement?.lastElementChild).toBe(availability);
     });
   });
 

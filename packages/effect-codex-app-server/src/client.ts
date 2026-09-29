@@ -5,11 +5,13 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stdio from "effect/Stdio";
+import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import * as CodexRpc from "./_generated/meta.gen.ts";
 import * as CodexError from "./errors.ts";
 import * as CodexProtocol from "./protocol.ts";
+import { normalizeCodexAccountPlanPayload } from "./compatibility.ts";
 import {
   decodeNotificationPayload,
   decodeOptionalPayload,
@@ -205,9 +207,10 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
           ]
         : undefined;
     const handlers = notificationHandlers.get(notification.method) ?? [];
+    const params = normalizeCodexAccountPlanPayload(notification.method, notification.params);
 
     if (schema) {
-      return decodeNotificationPayload(notification.method, schema, notification.params).pipe(
+      return decodeNotificationPayload(notification.method, schema, params).pipe(
         Effect.matchEffect({
           onFailure: (error) =>
             logNotificationDispatchIssue({
@@ -219,7 +222,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
                 // Generated schemas can lag Codex app-server releases. Keep
                 // notification flow alive by giving registered handlers the raw
                 // params instead of dropping the event silently.
-                runNotificationHandlers(notification.method, handlers, notification.params),
+                runNotificationHandlers(notification.method, handlers, params),
               ),
             ),
           onSuccess: (decoded) => runNotificationHandlers(notification.method, handlers, decoded),
@@ -295,7 +298,12 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
         ): Effect.Effect<
           CodexRpc.ClientRequestResponsesByMethod[M],
           CodexError.CodexAppServerError
-        > => decodeOptionalPayload(method, getClientRequestResponseSchema(method), raw),
+        > =>
+          decodeOptionalPayload(
+            method,
+            getClientRequestResponseSchema(method),
+            normalizeCodexAccountPlanPayload(method, raw),
+          ),
       ),
     );
 
@@ -309,7 +317,18 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
 
   return CodexAppServerClient.of({
     raw: {
-      notifications: transport.incomingNotifications,
+      // Cafe's long-lived runtime consumes the raw stream independently of
+      // typed handlers. Apply the same narrow metadata adaptation here, or a
+      // future plan would still fail the adapter's downstream strict decoder.
+      notifications: transport.incomingNotifications.pipe(
+        // The transport also dispatches this envelope to typed handlers; do
+        // not mutate their shared input. Clone only changed plan metadata.
+        // oxlint-disable-next-line no-map-spread
+        Stream.map((notification) => {
+          const params = normalizeCodexAccountPlanPayload(notification.method, notification.params);
+          return params === notification.params ? notification : { ...notification, params };
+        }),
+      ),
       requests: transport.incomingRequests,
       request: transport.request,
       notify: transport.notify,
