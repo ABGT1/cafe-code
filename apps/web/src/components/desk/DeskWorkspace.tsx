@@ -65,7 +65,15 @@ import { useUiStateStore } from "../../uiStateStore";
 import { readLocalApi } from "../../localApi";
 import { useRenameChat } from "../../hooks/useRenameChat";
 import { useDeskTabMetadata, readDeskTabMetadata } from "./useDeskTabMetadata";
-import { deskDropEdge, deskInsertionIndex, projectDeskLayout, type DeskRect } from "./deskLayout";
+import {
+  deskDropEdge,
+  deskInsertionIndex,
+  deskResizeBounds,
+  fitDeskLayout,
+  projectDeskLayout,
+  type DeskRect,
+  type DeskSize,
+} from "./deskLayout";
 import { deskCollisionDetection } from "./deskDrag";
 import "./desk.css";
 
@@ -361,6 +369,9 @@ function ChatTab({
 function GroupTabs({
   group,
   hint,
+  restoreGroups,
+  canRestoreGroups,
+  onToggleFocus,
   onMenu,
   onRename,
   onRenameGroup,
@@ -368,13 +379,15 @@ function GroupTabs({
 }: {
   group: DeskGroup;
   hint: DropHint;
+  restoreGroups: boolean;
+  canRestoreGroups: boolean;
+  onToggleFocus: () => void;
   onMenu: (key: string | null, position: { x: number; y: number }) => void;
   onRename: (target: ThreadRouteTarget) => void;
   onRenameGroup: () => void;
   onOverflow: () => void;
 }) {
   const desk = useDeskStore((s) => s.desk);
-  const dispatch = useDeskStore((s) => s.dispatch);
   const strip = useRef<HTMLDivElement>(null);
   const insertionIndex = hint?.kind === "insert" && hint.groupId === group.id ? hint.index : null;
   const drop = useDroppable({
@@ -456,11 +469,18 @@ function GroupTabs({
       </button>
       <button
         className="desk-icon"
-        aria-label={desk.focusedGroupId ? "Restore all groups" : `Focus ${group.name}`}
-        title={desk.focusedGroupId ? "Restore all groups" : "Focus group"}
-        onClick={() => dispatch({ type: "focus", groupId: desk.focusedGroupId ? null : group.id })}
+        aria-label={restoreGroups ? "Restore all groups" : `Focus ${group.name}`}
+        title={
+          restoreGroups
+            ? canRestoreGroups
+              ? "Restore all groups"
+              : "Enlarge the window to restore all groups"
+            : "Focus group"
+        }
+        disabled={restoreGroups && !canRestoreGroups}
+        onClick={onToggleFocus}
       >
-        {desk.focusedGroupId ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+        {restoreGroups ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
       </button>
       <button
         className="desk-icon"
@@ -516,12 +536,18 @@ function Pane({
 function ResizeDivider({
   node,
   rect,
+  area,
 }: {
   node: Extract<DeskLayout, { kind: "split" }>;
   rect: DeskRect;
+  area: DeskSize;
 }) {
   const dispatch = useDeskStore((s) => s.dispatch);
   const x = node.axis === "x";
+  const limits = deskResizeBounds(node, {
+    width: rect.width * area.width,
+    height: rect.height * area.height,
+  });
   const style: CSSProperties = x
     ? {
         left: `${(rect.x + rect.width * node.ratio) * 100}%`,
@@ -542,10 +568,11 @@ function ResizeDivider({
       aria-label="Resize chat groups"
       aria-orientation={x ? "vertical" : "horizontal"}
       aria-valuenow={Math.round(node.ratio * 100)}
-      aria-valuemin={20}
-      aria-valuemax={80}
+      aria-valuemin={Math.round((limits?.min ?? node.ratio) * 100)}
+      aria-valuemax={Math.round((limits?.max ?? node.ratio) * 100)}
       style={style}
       onPointerDown={(e) => {
+        if (e.button !== 0 || !limits) return;
         e.preventDefault();
         e.currentTarget.setPointerCapture(e.pointerId);
       }}
@@ -553,10 +580,22 @@ function ResizeDivider({
         if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
         const bounds = e.currentTarget.parentElement?.getBoundingClientRect();
         if (!bounds) return;
+        // Derive the bound from the current host, not a stale pointer-down
+        // width. Descendant panes also need their minimum sizes: clamping only
+        // this split's immediate percentage can strand a nested divider.
+        const currentLimits = deskResizeBounds(node, {
+          width: rect.width * bounds.width,
+          height: rect.height * bounds.height,
+        });
+        if (!currentLimits) return;
         const ratio = x
           ? ((e.clientX - bounds.left) / bounds.width - rect.x) / rect.width
           : ((e.clientY - bounds.top) / bounds.height - rect.y) / rect.height;
-        dispatch({ type: "resize", splitId: node.id, ratio });
+        dispatch({
+          type: "resize",
+          splitId: node.id,
+          ratio: Math.max(currentLimits.min, Math.min(currentLimits.max, ratio)),
+        });
       }}
       onPointerUp={(e) => {
         if (e.currentTarget.hasPointerCapture(e.pointerId))
@@ -576,9 +615,13 @@ function ResizeDivider({
             : e.key === "ArrowDown"
               ? 0.05
               : 0;
-        if (delta) {
+        if (delta && limits) {
           e.preventDefault();
-          dispatch({ type: "resize", splitId: node.id, ratio: node.ratio + delta });
+          dispatch({
+            type: "resize",
+            splitId: node.id,
+            ratio: Math.max(limits.min, Math.min(limits.max, node.ratio + delta)),
+          });
         }
       }}
     />
@@ -623,17 +666,26 @@ export default function DeskWorkspace() {
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
-  const geometry = useMemo(() => projectDeskLayout(desk.layout), [desk.layout]);
+  // Fit the saved preferences to the current viewport without rewriting them.
+  // Old extreme ratios and temporarily smaller windows must not turn a usable
+  // split into automatic focus mode and remove its only resize handle.
+  const fittedLayout = useMemo(() => fitDeskLayout(desk.layout, area), [desk.layout, area]);
+  const geometry = useMemo(
+    () => projectDeskLayout(fittedLayout ?? desk.layout),
+    [fittedLayout, desk.layout],
+  );
   const groupIds = deskGroupIds(desk.layout);
   // Never squeeze unchanged composers into unusable quarter-width slivers.
-  // This is presentation-only: restore the exact split ratios on a larger view.
-  const narrow =
-    area.width > 0 &&
-    (area.width < 760 ||
-      geometry.panes.some(
-        ({ rect }) => rect.width * area.width < 380 || rect.height * area.height < 280,
-      ));
+  // Collapse only when the layout cannot fit at ANY admissible ratios, not
+  // because one user-selected ratio made an otherwise viable pane too small.
+  const narrow = area.width > 0 && (area.width < 760 || fittedLayout === null);
   const isolated = desk.focusedGroupId ?? (narrow ? desk.activeGroupId : null);
+  const restoreGroups = desk.focusedGroupId !== null || (narrow && groupIds.length > 1);
+  const canRestoreGroups = groupIds.length < 2 || !narrow;
+  const toggleGroupFocus = (groupId: string) => {
+    if (restoreGroups && !canRestoreGroups) return;
+    dispatch({ type: "focus", groupId: restoreGroups ? null : groupId });
+  };
   const panes = isolated
     ? [{ groupId: isolated, rect: { x: 0, y: 0, width: 1, height: 1 } }]
     : geometry.panes;
@@ -755,10 +807,12 @@ export default function DeskWorkspace() {
           secondGroupId: otherId,
         });
       }
-    item("focus", current.focusedGroupId ? "Restore all groups" : "Focus group", {
-      type: "focus",
-      groupId: current.focusedGroupId ? null : groupId,
-    });
+    item(
+      "focus",
+      restoreGroups ? "Restore all groups" : "Focus group",
+      { type: "focus", groupId: restoreGroups ? null : groupId },
+      restoreGroups && !canRestoreGroups,
+    );
     const railDocked = group.sessionRailDocked ?? defaultDocked;
     item("session-rail", railDocked ? "Unpin session information" : "Pin session information", {
       type: "sessionRail",
@@ -994,7 +1048,15 @@ export default function DeskWorkspace() {
                               </button>
                             ))}
                             {desk.focusedGroupId && (
-                              <button onClick={() => dispatch({ type: "focus", groupId: null })}>
+                              <button
+                                disabled={!canRestoreGroups}
+                                title={
+                                  canRestoreGroups
+                                    ? undefined
+                                    : "Enlarge the window to restore all groups"
+                                }
+                                onClick={() => toggleGroupFocus(groupId)}
+                              >
                                 Restore layout
                               </button>
                             )}
@@ -1003,6 +1065,9 @@ export default function DeskWorkspace() {
                         <GroupTabs
                           group={group}
                           hint={hint}
+                          restoreGroups={restoreGroups}
+                          canRestoreGroups={canRestoreGroups}
+                          onToggleFocus={() => toggleGroupFocus(groupId)}
                           onMenu={(key, pos) => {
                             void showMenu(groupId, key, pos);
                           }}
@@ -1026,7 +1091,7 @@ export default function DeskWorkspace() {
           {!isolated &&
             hasTabs &&
             geometry.dividers.map(({ node, rect }) => (
-              <ResizeDivider key={node.id} node={node} rect={rect} />
+              <ResizeDivider key={node.id} node={node} rect={rect} area={area} />
             ))}
           {!hasTabs && emptyQueueHost && desk.environmentId === primaryEnvironmentId && (
             <div hidden aria-hidden inert>

@@ -292,6 +292,24 @@ function expectInsertionSlot(host: HTMLElement, strip: Element, index: number) {
   expect(markerBounds.right).toBeLessThanOrEqual(stripBounds.right + 2);
 }
 
+function rootDeskSplit() {
+  const layout = useDeskStore.getState().desk.layout;
+  if (layout.kind !== "split") throw new Error("Expected a split fixture layout");
+  return layout;
+}
+
+function expectUsablePanes(host: HTMLElement, count: number) {
+  const panes = host.querySelectorAll(".desk-pane");
+  expect(panes).toHaveLength(count);
+  for (const pane of panes) {
+    const bounds = pane.getBoundingClientRect();
+    // CSS layout rounds fractional percentages to physical layout units. The
+    // tolerance is below one CSS pixel, not permission to hide a small pane.
+    expect(bounds.width).toBeGreaterThanOrEqual(379.9);
+    expect(bounds.height).toBeGreaterThanOrEqual(279.9);
+  }
+}
+
 describe("Desk workspace navigation chrome", () => {
   it.each(["cold", "last-selected"] as const)(
     "keeps a hidden queue host when the %s server candidate still belongs to a pending draft",
@@ -1111,6 +1129,301 @@ describe("Desk workspace navigation chrome", () => {
         key("three"),
         key("two"),
       ]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it.each([
+    { axis: "x", edge: "split-right", previous: "ArrowLeft", next: "ArrowRight", minimum: 380 },
+    { axis: "y", edge: "split-bottom", previous: "ArrowUp", next: "ArrowDown", minimum: 280 },
+  ] as const)(
+    "keeps the $axis divider mounted across pointer and keyboard limits and permits reversing",
+    async ({ axis, edge, previous, next, minimum }) => {
+      const { screen, host, cleanup } = await setup();
+      try {
+        host.style.width = "1000px";
+        mocks.showMenu.mockResolvedValueOnce(edge);
+        await screen.getByRole("button", { name: "Main tab actions" }).click();
+        await screen.getByRole("button", { name: "Toggle rail three" }).click();
+        await vi.waitFor(() => expectUsablePanes(host, 2));
+        const separator = screen.getByRole("separator", { name: "Resize chat groups" });
+        const divider = separator.element();
+        const workspace = host.querySelector(".desk-workspace")!.getBoundingClientRect();
+        const extent = axis === "x" ? workspace.width : workspace.height;
+        const min = Math.max(0.2, minimum / extent);
+        const max = Math.min(0.8, 1 - minimum / extent);
+        const point = (ratio: number) => ({
+          x: workspace.left + workspace.width * (axis === "x" ? ratio : 0.5),
+          y: workspace.top + workspace.height * (axis === "y" ? ratio : 0.5),
+        });
+        const groups = useDeskStore.getState().desk.groups;
+        const targets = useDeskStore.getState().desk.targets;
+        const composer = screen.getByRole("textbox", { name: "Existing composer three" });
+        await composer.fill("Keep this unsent draft while resizing");
+        const composerElement = composer.element();
+
+        // One continuous captured drag crosses both limits, then comes back.
+        // A disappearing separator would silently lose pointer capture and
+        // make the return movement ineffective even if the final pane fit.
+        await dragPointer(divider, point(0.01), async (moveTo) => {
+          expect(rootDeskSplit().ratio).toBeCloseTo(min, 5);
+          expectUsablePanes(host, 2);
+          expect(separator.element()).toBe(divider);
+          await moveTo(point(0.99));
+          expect(rootDeskSplit().ratio).toBeCloseTo(max, 5);
+          expectUsablePanes(host, 2);
+          expect(separator.element()).toBe(divider);
+          await moveTo(point(0.5));
+          expect(rootDeskSplit().ratio).toBeCloseTo(0.5, 5);
+        });
+        await expect
+          .element(separator)
+          .toHaveAttribute("aria-valuemin", String(Math.round(min * 100)));
+        await expect
+          .element(separator)
+          .toHaveAttribute("aria-valuemax", String(Math.round(max * 100)));
+
+        (divider as HTMLElement).focus();
+        await userEvent.keyboard(`{${previous}}`.repeat(16));
+        expect(rootDeskSplit().ratio).toBeCloseTo(min, 5);
+        await expect.element(separator).toHaveFocus();
+        await userEvent.keyboard(`{${next}}`);
+        expect(rootDeskSplit().ratio).toBeCloseTo(min + 0.05, 5);
+        await userEvent.keyboard(`{${next}}`.repeat(16));
+        expect(rootDeskSplit().ratio).toBeCloseTo(max, 5);
+        await userEvent.keyboard(`{${previous}}`);
+        expect(rootDeskSplit().ratio).toBeCloseTo(max - 0.05, 5);
+        expectUsablePanes(host, 2);
+        expect(separator.element()).toBe(divider);
+        expect(composer.element()).toBe(composerElement);
+        await expect.element(composer).toHaveValue("Keep this unsent draft while resizing");
+        expect(useDeskStore.getState().desk.groups).toBe(groups);
+        expect(useDeskStore.getState().desk.targets).toBe(targets);
+        expect(useDeskStore.getState().desk.groups.g2?.sessionRailDocked).toBe(false);
+        expect(useDeskStore.getState().desk.focusedGroupId).toBeNull();
+        expect(mocks.rename).not.toHaveBeenCalled();
+      } finally {
+        useDeskStore.getState().flushPersistence();
+        await cleanup();
+      }
+    },
+  );
+
+  it.each([
+    { axis: "x", edge: "split-right", minimum: 380 },
+    { axis: "y", edge: "split-bottom", minimum: 280 },
+  ] as const)(
+    "reserves both nested $axis panes when clamping the parent and child dividers",
+    async ({ axis, edge, minimum }) => {
+      await page.viewport(1440, 1080);
+      const { screen, host, cleanup } = await setup();
+      try {
+        mocks.showMenu.mockResolvedValueOnce(edge);
+        await screen.getByRole("button", { name: "Main tab actions" }).click();
+        mocks.showMenu.mockResolvedValueOnce(edge);
+        await screen.getByRole("button", { name: "Main tab actions" }).click();
+        await vi.waitFor(() => expectUsablePanes(host, 3));
+        const dividers = host.querySelectorAll<HTMLElement>(`.desk-divider[data-axis="${axis}"]`);
+        expect(dividers).toHaveLength(2);
+        const outer = dividers[0]!;
+        const inner = dividers[1]!;
+        const workspace = host.querySelector(".desk-workspace")!.getBoundingClientRect();
+        const extent = axis === "x" ? workspace.width : workspace.height;
+        const point = (ratio: number) => ({
+          x: workspace.left + workspace.width * (axis === "x" ? ratio : 0.5),
+          y: workspace.top + workspace.height * (axis === "y" ? ratio : 0.5),
+        });
+        const groupIds = deskGroupIds(useDeskStore.getState().desk.layout);
+        const groups = useDeskStore.getState().desk.groups;
+        const targets = useDeskStore.getState().desk.targets;
+        await dragPointer(outer, point(0.01), async (moveTo) => {
+          // The first subtree contains two panes, not one. A leaf-only bound
+          // would make its child divider vanish during this same gesture.
+          expect(rootDeskSplit().ratio).toBeCloseTo((2 * minimum) / extent, 5);
+          expectUsablePanes(host, 3);
+          expect(outer.isConnected && inner.isConnected).toBe(true);
+          await moveTo(point(0.99));
+          expect(rootDeskSplit().ratio).toBeCloseTo(1 - minimum / extent, 5);
+          expectUsablePanes(host, 3);
+        });
+        const parentRatio = rootDeskSplit().ratio;
+        await dragPointer(inner, point(0.01), async (moveTo) => {
+          expectUsablePanes(host, 3);
+          expect(outer.isConnected && inner.isConnected).toBe(true);
+          await moveTo(point(parentRatio - 0.01));
+          expectUsablePanes(host, 3);
+          await moveTo(point(parentRatio / 2));
+          const child = rootDeskSplit().children[0];
+          expect(child.kind === "split" && child.ratio).toBeCloseTo(0.5, 5);
+        });
+        expect(deskGroupIds(useDeskStore.getState().desk.layout)).toEqual(groupIds);
+        expect(useDeskStore.getState().desk.groups).toBe(groups);
+        expect(useDeskStore.getState().desk.targets).toBe(targets);
+        expect(useDeskStore.getState().desk.focusedGroupId).toBeNull();
+      } finally {
+        await cleanup();
+      }
+    },
+  );
+
+  it.each([0.2, 0.8])(
+    "fits a hydrated %s ratio without rewriting saved layout or group preferences",
+    async (ratio) => {
+      for (const id of ["one", "two", "three"])
+        useDeskStore.getState().dispatch({ type: "open", target: target(id) });
+      useDeskStore.getState().dispatch({
+        type: "split",
+        tabKey: key("three"),
+        targetGroupId: "g1",
+        edge: "right",
+      });
+      useDeskStore.getState().dispatch({ type: "resize", splitId: rootDeskSplit().id, ratio });
+      useDeskStore.getState().dispatch({ type: "sessionRail", groupId: "g1", docked: true });
+      useDeskStore.getState().dispatch({ type: "sessionRail", groupId: "g2", docked: false });
+      const saved = localStorage.getItem(`cafe-code:desk:v1:${environmentId}`);
+      useDeskStore.setState({ desk: createDeskState() });
+      useDeskStore.getState().bindEnvironment(environmentId);
+      const hydrated = useDeskStore.getState().desk;
+      const { screen, host, cleanup } = await setup([]);
+      try {
+        host.style.width = "1000px";
+        await vi.waitFor(() => expectUsablePanes(host, 2));
+        const separator = screen.getByRole("separator", { name: "Resize chat groups" });
+        await expect
+          .element(separator)
+          .toHaveAttribute("aria-valuenow", ratio === 0.2 ? "38" : "62");
+        expect(useDeskStore.getState().desk.layout).toBe(hydrated.layout);
+        expect(rootDeskSplit().ratio).toBe(ratio);
+        expect(useDeskStore.getState().desk.groups).toBe(hydrated.groups);
+        expect(useDeskStore.getState().desk.targets).toBe(hydrated.targets);
+        expect(localStorage.getItem(`cafe-code:desk:v1:${environmentId}`)).toBe(saved);
+        await expect
+          .element(screen.getByRole("button", { name: "Toggle rail two" }))
+          .toHaveAttribute("aria-pressed", "true");
+        await expect
+          .element(screen.getByRole("button", { name: "Toggle rail three" }))
+          .toHaveAttribute("aria-pressed", "false");
+        expect(mocks.rename).not.toHaveBeenCalled();
+      } finally {
+        await cleanup();
+      }
+    },
+  );
+
+  it.each(["button", "switcher", "menu"] as const)(
+    "restores a focused saved extreme ratio through the %s without resetting preferences",
+    async (entry) => {
+      const { screen, host, cleanup } = await setup();
+      try {
+        host.style.width = "1000px";
+        mocks.showMenu.mockResolvedValueOnce("split-right");
+        await screen.getByRole("button", { name: "Main tab actions" }).click();
+        useDeskStore
+          .getState()
+          .dispatch({ type: "resize", splitId: rootDeskSplit().id, ratio: 0.2 });
+        await screen.getByRole("button", { name: "Toggle rail three" }).click();
+        await vi.waitFor(() => expectUsablePanes(host, 2));
+        const groups = useDeskStore.getState().desk.groups;
+        const targets = useDeskStore.getState().desk.targets;
+        const layout = useDeskStore.getState().desk.layout;
+        const composer = screen.getByRole("textbox", { name: "Existing composer three" });
+        await composer.fill("Keep the focused group's draft");
+        const composerElement = composer.element();
+        await screen.getByRole("button", { name: "Focus Group 2", exact: true }).click();
+        expect(useDeskStore.getState().desk.focusedGroupId).toBe("g2");
+        expect(host.querySelectorAll(".desk-pane")).toHaveLength(1);
+        if (entry === "menu") {
+          mocks.showMenu.mockResolvedValueOnce("focus");
+          await screen.getByRole("button", { name: "Group 2 tab actions" }).click();
+          expect(mocks.showMenu.mock.lastCall?.[0]).toContainEqual({
+            id: "focus",
+            label: "Restore all groups",
+            disabled: false,
+          });
+        } else {
+          await screen
+            .getByRole("button", {
+              name: entry === "button" ? "Restore all groups" : "Restore layout",
+              exact: true,
+            })
+            .click();
+        }
+        await vi.waitFor(() => expectUsablePanes(host, 2));
+        expect(useDeskStore.getState().desk.focusedGroupId).toBeNull();
+        expect(useDeskStore.getState().desk.layout).toBe(layout);
+        expect(rootDeskSplit().ratio).toBe(0.2);
+        expect(useDeskStore.getState().desk.groups).toBe(groups);
+        expect(useDeskStore.getState().desk.targets).toBe(targets);
+        expect(composer.element()).toBe(composerElement);
+        await expect.element(composer).toHaveValue("Keep the focused group's draft");
+        expect(mocks.rename).not.toHaveBeenCalled();
+      } finally {
+        await cleanup();
+      }
+    },
+  );
+
+  it("disables impossible restores and recovers automatically when the window expands", async () => {
+    const { screen, host, cleanup } = await setup();
+    try {
+      mocks.showMenu.mockResolvedValueOnce("split-right");
+      await screen.getByRole("button", { name: "Main tab actions" }).click();
+      useDeskStore.getState().dispatch({ type: "resize", splitId: rootDeskSplit().id, ratio: 0.2 });
+      await screen.getByRole("button", { name: "Toggle rail three" }).click();
+      const groups = useDeskStore.getState().desk.groups;
+      const targets = useDeskStore.getState().desk.targets;
+      const layout = useDeskStore.getState().desk.layout;
+      const composer = screen.getByRole("textbox", { name: "Existing composer three" });
+      await composer.fill("Keep this draft through a narrow window");
+      const composerElement = composer.element();
+      await page.viewport(650, 850);
+      const restore = screen.getByRole("button", { name: "Restore all groups", exact: true });
+      await expect.element(restore).toBeDisabled();
+      await expect
+        .element(restore)
+        .toHaveAttribute("title", "Enlarge the window to restore all groups");
+      expect(host.querySelectorAll(".desk-pane")).toHaveLength(1);
+      expect(host.querySelector(".desk-divider")).toBeNull();
+      expect(useDeskStore.getState().desk.focusedGroupId).toBeNull();
+      await expect
+        .element(screen.getByRole("button", { name: "Restore layout", exact: true }))
+        .not.toBeInTheDocument();
+      await screen.getByRole("button", { name: "Group 2 tab actions" }).click();
+      expect(mocks.showMenu.mock.lastCall?.[0]).toContainEqual({
+        id: "focus",
+        label: "Restore all groups",
+        disabled: true,
+      });
+      await page.viewport(1000, 850);
+      await vi.waitFor(() => expectUsablePanes(host, 2));
+      await expect
+        .element(screen.getByRole("button", { name: "Focus Group 2", exact: true }))
+        .toBeEnabled();
+
+      // Explicit focus survives the same narrow interval; restoring becomes
+      // possible on expansion without rewriting the preferred 20/80 ratio.
+      await screen.getByRole("button", { name: "Focus Group 2", exact: true }).click();
+      await page.viewport(650, 850);
+      await expect.element(restore).toBeDisabled();
+      const restoreLayout = screen.getByRole("button", { name: "Restore layout", exact: true });
+      await expect.element(restoreLayout).toBeDisabled();
+      await expect
+        .element(restoreLayout)
+        .toHaveAttribute("title", "Enlarge the window to restore all groups");
+      expect(useDeskStore.getState().desk.focusedGroupId).toBe("g2");
+      await page.viewport(1000, 850);
+      await expect.element(restore).toBeEnabled();
+      await expect.element(restoreLayout).toBeEnabled();
+      await restore.click();
+      await vi.waitFor(() => expectUsablePanes(host, 2));
+      expect(useDeskStore.getState().desk.focusedGroupId).toBeNull();
+      expect(useDeskStore.getState().desk.layout).toBe(layout);
+      expect(useDeskStore.getState().desk.groups).toBe(groups);
+      expect(useDeskStore.getState().desk.targets).toBe(targets);
+      expect(composer.element()).toBe(composerElement);
+      await expect.element(composer).toHaveValue("Keep this draft through a narrow window");
+      expect(mocks.rename).not.toHaveBeenCalled();
     } finally {
       await cleanup();
     }

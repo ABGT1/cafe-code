@@ -75,6 +75,19 @@ entry point when undocked or too narrow; group menus can also set the pin. Pane
 width, not full-window width, controls whether the rail fits. Focusing a group
 temporarily expands it without discarding the saved layout.
 
+Divider bounds include each descendant pane's 380px width/280px height minimum
+and the persisted 20–80% ratio limits. Pointer and keyboard resizing share those
+bounds so a drag cannot trigger responsive isolation and unmount its own handle.
+Viewport projection fits saved ratios without mutating the stored preferences;
+only an explicit resize changes them. Subtree minima account for split direction
+and ratio limits, including unbalanced nested layouts. Responsive single-pane
+mode is based on whether any valid arrangement of the existing tree can fit
+(with the existing 760px narrow-window breakpoint), not whether the saved ratios
+happen to produce a small pane. This recovers previously stranded layouts and
+retains their preferences when the window grows again. The existing focus/restore
+icon and menu use the same restoration state; an actually undersized window
+disables restoration with an explanation instead of offering a no-op control.
+
 ## Runtime and safety boundaries
 
 Mounting multiple views must not multiply input dispatch. A shared chat-layout

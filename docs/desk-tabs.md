@@ -13,6 +13,11 @@ project actions and the chat composer stay in their usual places.
   to that group. Escape or dropping outside the workspace cancels the move.
 - Use a tab's right-click menu or the group's `…` button for close, close others,
   close right, close all, reopen, split, move, merge and focus actions.
+- Dividers stop at usable pane sizes, including nested groups. Use the existing
+  focus/restore icon to expand one group and return to the split layout. Saved
+  ratios that no longer fit are adjusted for display without losing your layout
+  preference. If the window cannot fit all groups, the restore icon explains
+  that you need to enlarge the window; the split returns once there is room.
 - Click a sidebar row's pencil or press F2 on a tab/row to rename an existing chat.
   Top tabs show only an always-visible close X; rename also remains in their
   right-click menu. Click a pane's group name to rename the group.
