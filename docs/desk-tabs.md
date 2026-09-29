@@ -6,7 +6,9 @@ project actions and the chat composer stay in their usual places.
 
 - Open a chat from Projects or search to add/select its tab in the current group.
 - Drag tabs to reorder, into another group to move, or to a chat pane edge to
-  split. The group grip swaps group positions. Drag a divider to resize.
+  split. Hover the left or right half of a tab to see an insertion line before
+  or after it; empty tab-strip space appends. Tab-strip targets never show a
+  pane split preview. The group grip swaps group positions. Drag a divider to resize.
   The highlighted half follows the nearest outer edge; the center adds the tab
   to that group. Escape or dropping outside the workspace cancels the move.
 - Use a tab's right-click menu or the group's `…` button for close, close others,

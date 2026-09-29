@@ -52,6 +52,12 @@ between the center and edges of one pane. Preview and drop calculations share
 the collision detector's viewport pointer coordinates, not scroll-adjusted drag
 deltas. Tab hits must be inside their own visible strip and pane; releasing
 outside a pane cannot fall back to the dragged tab's overlapping rectangle.
+Tab/strip hits have a distinct insertion preview, not the pane-center overlay.
+Before/after boundaries update when the pointer crosses the same tab's midpoint;
+the drop consumes that exact boundary with the source-removal adjustment. The
+zero-width, noninteractive insertion line does not shift measured tabs and stays
+inside the visible scrolling strip. Stale target IDs are rejected during
+pane-to-strip transitions, so a previous pane hit cannot flash a split preview.
 Keyboard gestures retain rectangle-based targeting. Chat content is a local
 stacking context so its own overlays cannot cover the sibling drop preview.
 These interactions only change local navigation state, never provider state.

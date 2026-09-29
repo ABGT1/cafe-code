@@ -277,6 +277,21 @@ async function dragPointer(
   }
 }
 
+function expectInsertionSlot(host: HTMLElement, strip: Element, index: number) {
+  const markers = host.querySelectorAll<HTMLElement>("[data-desk-insertion-index]");
+  expect(markers).toHaveLength(1);
+  const marker = markers[0]!;
+  expect(strip.contains(marker)).toBe(true);
+  expect(marker.dataset.deskInsertionIndex).toBe(String(index));
+  // Reordering is distinct from moving/splitting a pane. Assert the feedback
+  // before release: checking only final order missed the misleading rectangle.
+  expect(host.querySelector(".desk-drop-hint")).toBeNull();
+  const markerBounds = marker.getBoundingClientRect();
+  const stripBounds = strip.getBoundingClientRect();
+  expect(markerBounds.left).toBeGreaterThanOrEqual(stripBounds.left - 2);
+  expect(markerBounds.right).toBeLessThanOrEqual(stripBounds.right + 2);
+}
+
 describe("Desk workspace navigation chrome", () => {
   it.each(["cold", "last-selected"] as const)(
     "keeps a hidden queue host when the %s server candidate still belongs to a pending draft",
@@ -316,7 +331,7 @@ describe("Desk workspace navigation chrome", () => {
   );
 
   it("drags the first tab after the last tab through the real pointer sensor", async () => {
-    const { screen, cleanup } = await setup();
+    const { screen, host, cleanup } = await setup();
     try {
       const source = screen.getByRole("tab", { name: "Chat one", exact: true });
       const cell = screen
@@ -324,10 +339,19 @@ describe("Desk workspace navigation chrome", () => {
         .element()
         .closest(".desk-tab-cell")!;
       const box = cell.getBoundingClientRect();
-      await dragPointer(source.element(), {
-        x: box.left + box.width * 0.65,
-        y: box.top + box.height / 2,
-      });
+      await dragPointer(
+        source.element(),
+        { x: box.left + box.width * 0.65, y: box.top + box.height / 2 },
+        async () => {
+          await vi.waitFor(() =>
+            expectInsertionSlot(
+              host,
+              screen.getByRole("tablist", { name: "Main tabs" }).element(),
+              3,
+            ),
+          );
+        },
+      );
       await vi.waitFor(() =>
         expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([
           key("two"),
@@ -335,10 +359,349 @@ describe("Desk workspace navigation chrome", () => {
           key("one"),
         ]),
       );
+      expect(host.querySelector("[data-desk-insertion-index]")).toBeNull();
+      expect(deskGroupIds(useDeskStore.getState().desk.layout)).toEqual(["g1"]);
     } finally {
       await cleanup();
     }
   });
+
+  it.each([80, 100, 130])(
+    "updates before/after slots within one hovered tab and reorders in the middle at %i percent scale",
+    async (scale) => {
+      const previous = document.documentElement.style.fontSize;
+      applyInterfaceScalePercent(scale);
+      const { screen, host, cleanup } = await setup();
+      try {
+        const strip = screen.getByRole("tablist", { name: "Main tabs" }).element();
+        const cell = screen
+          .getByRole("tab", { name: "Chat two", exact: true })
+          .element()
+          .closest(".desk-tab-cell")!;
+        const box = cell.getBoundingClientRect();
+        const before = { x: box.left + box.width * 0.25, y: box.top + box.height / 2 };
+        const after = { x: box.left + box.width * 0.75, y: before.y };
+        await dragPointer(
+          screen.getByRole("tab", { name: "Chat one", exact: true }).element(),
+          before,
+          async (moveTo) => {
+            await vi.waitFor(() => expectInsertionSlot(host, strip, 1));
+            const firstBoundary = host
+              .querySelector<HTMLElement>("[data-desk-insertion-index]")!
+              .getBoundingClientRect().left;
+            // The target ID does not change across its midpoint. Both the slot
+            // and final move must follow the new side without an onDragOver.
+            await moveTo(after);
+            await vi.waitFor(() => {
+              expectInsertionSlot(host, strip, 2);
+              expect(
+                host
+                  .querySelector<HTMLElement>("[data-desk-insertion-index]")!
+                  .getBoundingClientRect().left,
+              ).toBeGreaterThan(firstBoundary);
+            });
+            await moveTo(before);
+            await vi.waitFor(() => expectInsertionSlot(host, strip, 1));
+            await moveTo(after);
+            await vi.waitFor(() => expectInsertionSlot(host, strip, 2));
+          },
+        );
+        expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([
+          key("two"),
+          key("one"),
+          key("three"),
+        ]);
+        expect(deskGroupIds(useDeskStore.getState().desk.layout)).toEqual(["g1"]);
+        expect(host.querySelector("[data-desk-insertion-index]")).toBeNull();
+        expect(host.querySelector(".desk-drop-hint")).toBeNull();
+      } finally {
+        await cleanup();
+        document.documentElement.style.fontSize = previous;
+      }
+    },
+  );
+
+  it("shows a start slot and moves the last tab before the first without splitting", async () => {
+    const { screen, host, cleanup } = await setup();
+    try {
+      const strip = screen.getByRole("tablist", { name: "Main tabs" }).element();
+      const box = screen
+        .getByRole("tab", { name: "Chat one", exact: true })
+        .element()
+        .closest(".desk-tab-cell")!
+        .getBoundingClientRect();
+      await dragPointer(
+        screen.getByRole("tab", { name: "Chat three", exact: true }).element(),
+        { x: box.left + box.width * 0.25, y: box.top + box.height / 2 },
+        async () => {
+          await vi.waitFor(() => expectInsertionSlot(host, strip, 0));
+        },
+      );
+      expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([
+        key("three"),
+        key("one"),
+        key("two"),
+      ]);
+      expect(deskGroupIds(useDeskStore.getState().desk.layout)).toEqual(["g1"]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("shows an append slot over unused strip space without a pane preview", async () => {
+    const { screen, host, cleanup } = await setup();
+    try {
+      const strip = screen.getByRole("tablist", { name: "Main tabs" }).element();
+      const stripBox = strip.getBoundingClientRect();
+      const last = screen
+        .getByRole("tab", { name: "Chat three", exact: true })
+        .element()
+        .closest(".desk-tab-cell")!
+        .getBoundingClientRect();
+      expect(stripBox.right - last.right).toBeGreaterThan(20);
+      await dragPointer(
+        screen.getByRole("tab", { name: "Chat one", exact: true }).element(),
+        { x: last.right + 12, y: stripBox.top + stripBox.height / 2 },
+        async () => {
+          await vi.waitFor(() => expectInsertionSlot(host, strip, 3));
+        },
+      );
+      expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([
+        key("two"),
+        key("three"),
+        key("one"),
+      ]);
+      expect(deskGroupIds(useDeskStore.getState().desk.layout)).toEqual(["g1"]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it("inserts into another group's tab strip without creating a split", async () => {
+    const { screen, host, cleanup } = await setup();
+    try {
+      mocks.showMenu.mockResolvedValueOnce("split-right");
+      await screen.getByRole("button", { name: "Main tab actions" }).click();
+      const strip = screen.getByRole("tablist", { name: "Group 2 tabs" }).element();
+      const box = screen
+        .getByRole("tab", { name: "Chat three", exact: true })
+        .element()
+        .closest(".desk-tab-cell")!
+        .getBoundingClientRect();
+      await dragPointer(
+        screen.getByRole("tab", { name: "Chat one", exact: true }).element(),
+        { x: box.left + box.width * 0.25, y: box.top + box.height / 2 },
+        async () => {
+          await vi.waitFor(() => expectInsertionSlot(host, strip, 0));
+        },
+      );
+      expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual([key("two")]);
+      expect(useDeskStore.getState().desk.groups.g2?.tabs).toEqual([key("one"), key("three")]);
+      expect(deskGroupIds(useDeskStore.getState().desk.layout)).toEqual(["g1", "g2"]);
+      expect(host.querySelector("[data-desk-insertion-index]")).toBeNull();
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it.each(["Escape", "outside"] as const)(
+    "clears an insertion slot on %s without moving the tab",
+    async (cancel) => {
+      const { screen, host, cleanup } = await setup();
+      try {
+        host.style.width = "calc(100% - 180px)";
+        const strip = screen.getByRole("tablist", { name: "Main tabs" }).element();
+        const box = screen
+          .getByRole("tab", { name: "Chat two", exact: true })
+          .element()
+          .closest(".desk-tab-cell")!
+          .getBoundingClientRect();
+        const before = useDeskStore.getState().desk.groups.g1?.tabs;
+        await dragPointer(
+          screen.getByRole("tab", { name: "Chat one", exact: true }).element(),
+          { x: box.left + box.width * 0.75, y: box.top + box.height / 2 },
+          async (moveTo) => {
+            await vi.waitFor(() => expectInsertionSlot(host, strip, 2));
+            if (cancel === "Escape") await userEvent.keyboard("{Escape}");
+            else
+              await moveTo({
+                x: host.getBoundingClientRect().right + 8,
+                y: box.top + box.height / 2,
+              });
+            await vi.waitFor(() => {
+              expect(host.querySelector("[data-desk-insertion-index]")).toBeNull();
+              expect(host.querySelector(".desk-drop-hint")).toBeNull();
+            });
+          },
+        );
+        expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual(before);
+        expect(deskGroupIds(useDeskStore.getState().desk.layout)).toEqual(["g1"]);
+      } finally {
+        await cleanup();
+      }
+    },
+  );
+
+  it.each([80, 130])(
+    "keeps insertion slots aligned after overflow scrolling at %i percent scale",
+    async (scale) => {
+      const previous = document.documentElement.style.fontSize;
+      applyInterfaceScalePercent(scale);
+      const ids = Array.from({ length: 12 }, (_, index) => `overflow-${index}`);
+      mocks.environment.threadShellById = Object.fromEntries(
+        ids.map((id) => [id, { id, archivedAt: null }]),
+      );
+      const { screen, host, cleanup } = await setup(ids);
+      try {
+        host.style.width = "680px";
+        const strip = screen.getByRole("tablist", { name: "Main tabs" }).element() as HTMLElement;
+        const source = screen.getByRole("tab", { name: "Chat overflow-11", exact: true }).element();
+        // Resizing the fixture schedules the same selected-tab reveal as the
+        // real UI. Wait for that observer before measuring a physical gesture;
+        // a positive old scroll offset alone does not mean the source is visible.
+        await vi.waitFor(() => {
+          expect(strip.scrollLeft).toBeGreaterThan(0);
+          const sourceBounds = source.getBoundingClientRect();
+          const viewport = strip.getBoundingClientRect();
+          expect(sourceBounds.left).toBeGreaterThanOrEqual(viewport.left);
+          expect(sourceBounds.right).toBeLessThanOrEqual(viewport.right + 1);
+        });
+        const targetCell = screen
+          .getByRole("tab", { name: "Chat overflow-10", exact: true })
+          .element()
+          .closest(".desk-tab-cell")!;
+        const box = targetCell.getBoundingClientRect();
+        await dragPointer(
+          source,
+          { x: box.left + box.width * 0.25, y: box.top + box.height / 2 },
+          async (moveTo) => {
+            await vi.waitFor(() => expectInsertionSlot(host, strip, 10));
+            // Scroll during the active drag. dnd-kit's measured tab rectangles
+            // follow the scroll; the raw pointer must not gain its scroll delta.
+            strip.scrollLeft -= 40;
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+            const shifted = targetCell.getBoundingClientRect();
+            await moveTo({
+              x: shifted.left + shifted.width * 0.25,
+              y: shifted.top + shifted.height / 2,
+            });
+            await vi.waitFor(() => {
+              expectInsertionSlot(host, strip, 10);
+              const marker = host
+                .querySelector<HTMLElement>("[data-desk-insertion-index]")!
+                .getBoundingClientRect();
+              expect(Math.abs(marker.left - targetCell.getBoundingClientRect().left)).toBeLessThan(
+                3,
+              );
+            });
+          },
+        );
+        expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual(
+          [...ids.slice(0, 10), ids[11]!, ids[10]!].map(key),
+        );
+        expect(deskGroupIds(useDeskStore.getState().desk.layout)).toEqual(["g1"]);
+        expect(host.querySelector("[data-desk-insertion-index]")).toBeNull();
+      } finally {
+        await cleanup();
+        document.documentElement.style.fontSize = previous;
+      }
+    },
+  );
+
+  it.each(["left", "right"] as const)(
+    "clamps a partially clipped %s insertion boundary inside the strip without shifting tabs",
+    async (side) => {
+      const ids = Array.from({ length: 12 }, (_, index) => `clipped-${index}`);
+      mocks.environment.threadShellById = Object.fromEntries(
+        ids.map((id) => [id, { id, archivedAt: null }]),
+      );
+      const { screen, host, cleanup } = await setup(ids);
+      try {
+        host.style.width = "680px";
+        const strip = screen.getByRole("tablist", { name: "Main tabs" }).element() as HTMLElement;
+        const source = screen.getByRole("tab", { name: "Chat clipped-10", exact: true }).element();
+        await vi.waitFor(() => {
+          const bounds = source.getBoundingClientRect();
+          const viewport = strip.getBoundingClientRect();
+          expect(bounds.left).toBeGreaterThanOrEqual(viewport.left);
+          expect(bounds.right).toBeLessThanOrEqual(viewport.right);
+        });
+        const pane = screen
+          .getByRole("region", { name: "Main chat group" })
+          .element()
+          .getBoundingClientRect();
+        const before = useDeskStore.getState().desk.groups.g1?.tabs;
+        await dragPointer(
+          source,
+          { x: pane.left + pane.width / 2, y: pane.top + pane.height / 2 },
+          async (moveTo) => {
+            // Choose an earlier tab on the left so the requested clipping is
+            // reachable before the strip hits its maximum scroll offset.
+            const targetIndex = side === "left" ? 7 : 8;
+            const cell = screen
+              .getByRole("tab", { name: `Chat clipped-${targetIndex}`, exact: true })
+              .element()
+              .closest(".desk-tab-cell")!;
+            const viewport = strip.getBoundingClientRect();
+            const original = cell.getBoundingClientRect();
+            const desiredLeft =
+              side === "left"
+                ? viewport.left - original.width * 0.25
+                : viewport.right - original.width * 0.75;
+            strip.scrollLeft += original.left - desiredLeft;
+            await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+            const clipped = cell.getBoundingClientRect();
+            if (side === "left") expect(clipped.left).toBeLessThan(viewport.left);
+            else expect(clipped.right).toBeGreaterThan(viewport.right);
+            const stablePosition = clipped.left - viewport.left + strip.scrollLeft;
+            const expectedIndex = targetIndex + (side === "right" ? 1 : 0);
+            await moveTo({
+              x:
+                side === "left"
+                  ? viewport.left + clipped.width * 0.1
+                  : viewport.right - clipped.width * 0.1,
+              y: clipped.top + clipped.height / 2,
+            });
+            await vi.waitFor(() => expectInsertionSlot(host, strip, expectedIndex));
+            // The sensor deliberately auto-scrolls near an edge. Restore the
+            // exact partial clip after its target-change effects settle, then
+            // inspect sticky CSS synchronously before the next scroll tick.
+            // The pointer remains over the same visible half of this tab.
+            strip.scrollLeft += cell.getBoundingClientRect().left - desiredLeft;
+            {
+              expectInsertionSlot(host, strip, expectedIndex);
+              const marker = host.querySelector<HTMLElement>("[data-desk-insertion-index]")!;
+              const bounds = marker.getBoundingClientRect();
+              const currentViewport = strip.getBoundingClientRect();
+              const currentCell = cell.getBoundingClientRect();
+              const paintedWidth = Number.parseFloat(getComputedStyle(marker, "::before").width);
+              expect(paintedWidth).toBe(2);
+              expect(bounds.left).toBeGreaterThanOrEqual(currentViewport.left);
+              expect(bounds.left + paintedWidth).toBeLessThanOrEqual(currentViewport.right + 0.5);
+              if (side === "left") expect(currentCell.left).toBeLessThan(currentViewport.left);
+              else expect(currentCell.right).toBeGreaterThan(currentViewport.right);
+              // Auto-scroll may move the viewport, but introducing feedback must
+              // not move or resize the underlying tab in strip-content space.
+              expect(Math.abs(currentCell.width - clipped.width)).toBeLessThan(1);
+              expect(
+                Math.abs(
+                  currentCell.left - currentViewport.left + strip.scrollLeft - stablePosition,
+                ),
+              ).toBeLessThan(1);
+            }
+            await userEvent.keyboard("{Escape}");
+            await vi.waitFor(() =>
+              expect(host.querySelector("[data-desk-insertion-index]")).toBeNull(),
+            );
+          },
+        );
+        expect(useDeskStore.getState().desk.groups.g1?.tabs).toEqual(before);
+        expect(deskGroupIds(useDeskStore.getState().desk.layout)).toEqual(["g1"]);
+      } finally {
+        await cleanup();
+      }
+    },
+  );
 
   it("moves a tab to another pane center without accidentally splitting", async () => {
     const { screen, cleanup } = await setup();

@@ -91,6 +91,29 @@
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
 }
+/* A zero-width flex item marks a boundary without shifting tab measurements.
+   Sticky inline edges keep its painted line inside an overflow-scrolling strip
+   even when the destination boundary is partially clipped. It cannot become
+   a pointer/drop target or intercept the tab's normal close control. */
+.desk-tab-insertion {
+  position: sticky;
+  left: 0;
+  right: 2px;
+  flex: 0 0 0;
+  align-self: stretch;
+  pointer-events: none;
+  z-index: 2;
+}
+.desk-tab-insertion::before {
+  content: "";
+  position: absolute;
+  top: 0.15rem;
+  bottom: 0.15rem;
+  left: 0;
+  width: 2px;
+  background: var(--primary);
+  box-shadow: 0 0 0.3rem color-mix(in srgb, var(--primary) 45%, transparent);
+}
 .desk-tab-cell {
   display: flex;
   flex: 0 0 auto;

@@ -1,4 +1,12 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import {
+  Fragment,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import {
   DndContext,
@@ -64,7 +72,13 @@ import "./desk.css";
 type DragData =
   | { kind: "tab"; tabKey: string; groupId: string; index: number }
   | { kind: "group" | "pane" | "strip"; groupId: string };
-type DropHint = { groupId: string; edge: ReturnType<typeof deskDropEdge> } | null;
+// A tab-strip insertion is not a pane-center drop. Keep its boundary index
+// before removing the dragged tab so preview and commit share one intention,
+// including when the pointer crosses a tab midpoint without changing target.
+type DropHint =
+  | { kind: "insert"; groupId: string; index: number }
+  | { kind: "pane"; groupId: string; edge: ReturnType<typeof deskDropEdge> }
+  | null;
 const rectStyle = (r: DeskRect): CSSProperties => ({
   left: `${r.x * 100}%`,
   top: `${r.y * 100}%`,
@@ -346,12 +360,14 @@ function ChatTab({
 
 function GroupTabs({
   group,
+  hint,
   onMenu,
   onRename,
   onRenameGroup,
   onOverflow,
 }: {
   group: DeskGroup;
+  hint: DropHint;
   onMenu: (key: string | null, position: { x: number; y: number }) => void;
   onRename: (target: ThreadRouteTarget) => void;
   onRenameGroup: () => void;
@@ -360,6 +376,7 @@ function GroupTabs({
   const desk = useDeskStore((s) => s.desk);
   const dispatch = useDeskStore((s) => s.dispatch);
   const strip = useRef<HTMLDivElement>(null);
+  const insertionIndex = hint?.kind === "insert" && hint.groupId === group.id ? hint.index : null;
   const drop = useDroppable({
     id: `strip:${group.id}`,
     data: { kind: "strip", groupId: group.id } satisfies DragData,
@@ -402,17 +419,32 @@ function GroupTabs({
         {group.tabs.map((key, index) => {
           const target = desk.targets[key];
           return target ? (
-            <ChatTab
-              key={key}
-              target={target}
-              tabKey={key}
-              group={group}
-              index={index}
-              onMenu={onMenu}
-              onRename={onRename}
-            />
+            <Fragment key={key}>
+              {insertionIndex === index && (
+                <span
+                  className="desk-tab-insertion"
+                  data-desk-insertion-index={index}
+                  aria-hidden
+                />
+              )}
+              <ChatTab
+                target={target}
+                tabKey={key}
+                group={group}
+                index={index}
+                onMenu={onMenu}
+                onRename={onRename}
+              />
+            </Fragment>
           ) : null;
         })}
+        {insertionIndex === group.tabs.length && (
+          <span
+            className="desk-tab-insertion"
+            data-desk-insertion-index={group.tabs.length}
+            aria-hidden
+          />
+        )}
       </div>
       <button
         className="desk-icon"
@@ -474,7 +506,7 @@ function Pane({
       onFocusCapture={() => dispatch({ type: "activateGroup", groupId: group.id })}
     >
       {children}
-      {hint?.groupId === group.id && (
+      {hint?.kind === "pane" && hint.groupId === group.id && (
         <div className="desk-drop-hint" data-edge={hint.edge ?? "center"} aria-hidden />
       )}
     </section>
@@ -754,6 +786,10 @@ export default function DeskWorkspace() {
   const getHint = (event: DragMoveEvent): DropHint => {
     const data = event.over?.data.current as DragData | undefined;
     if (!data) return null;
+    // Dnd-kit can emit movement before committing a new `over`. A containing
+    // pane still contains the pointer when a tab has become the first hit, so
+    // bounds alone cannot prevent a stale split preview above the tab strip.
+    if (event.collisions?.[0]?.id !== event.over?.id) return null;
     const point = getDragPoint(event);
     const rect = event.over!.rect;
     // onDragMove can precede onDragOver when crossing target IDs. Do not flash
@@ -767,25 +803,42 @@ export default function DeskWorkspace() {
         point.y > rect.top + rect.height)
     )
       return null;
-    if (data.kind !== "pane") return { groupId: data.groupId, edge: null };
     const source = event.active.data.current as DragData | undefined;
-    if (source?.kind !== "tab") return { groupId: data.groupId, edge: null };
-    return { groupId: data.groupId, edge: point ? deskDropEdge(point, rect) : null };
+    if (source?.kind !== "tab") return { kind: "pane", groupId: data.groupId, edge: null };
+    const group = useDeskStore.getState().desk.groups[data.groupId];
+    if (!group) return null;
+    if (data.kind === "tab") {
+      const index = group.tabs.indexOf(data.tabKey);
+      if (index < 0) return null;
+      return {
+        kind: "insert",
+        groupId: data.groupId,
+        index: index + (point && point.x > rect.left + rect.width / 2 ? 1 : 0),
+      };
+    }
+    if (data.kind === "strip") {
+      return { kind: "insert", groupId: data.groupId, index: group.tabs.length };
+    }
+    return { kind: "pane", groupId: data.groupId, edge: point ? deskDropEdge(point, rect) : null };
   };
   const updateHint = (event: DragMoveEvent) => {
     const next = getHint(event);
     // onDragOver is target-ID based in dnd-kit, not position based. Also listen
     // to moves to update center/edge previews inside one pane, but avoid a Desk
     // rerender for every pixel when the visible destination hasn't changed.
-    setHint((previous) =>
-      previous?.groupId === next?.groupId && previous?.edge === next?.edge ? previous : next,
-    );
+    setHint((previous) => {
+      if (!previous || !next || previous.groupId !== next.groupId) return next;
+      if (previous.kind === "insert" && next.kind === "insert" && previous.index === next.index)
+        return previous;
+      if (previous.kind === "pane" && next.kind === "pane" && previous.edge === next.edge)
+        return previous;
+      return next;
+    });
   };
   const endDrag = (event: DragEndEvent) => {
     const source = event.active.data.current as DragData | undefined;
     const over = event.over?.data.current as DragData | undefined;
     const destination = getHint(event);
-    const point = getDragPoint(event);
     setHint(null);
     dragPointer.current = null;
     if (!source || !over || !destination) return;
@@ -794,15 +847,11 @@ export default function DeskWorkspace() {
       return;
     }
     if (source.kind !== "tab") return;
-    if (over.kind === "tab") {
+    if (destination.kind === "insert") {
       const current = useDeskStore.getState().desk;
-      const old = current.groups[over.groupId]?.tabs.indexOf(source.tabKey) ?? -1;
-      const index = deskInsertionIndex(
-        old,
-        over.index,
-        (point?.x ?? 0) > event.over!.rect.left + event.over!.rect.width / 2,
-      );
-      dispatch({ type: "move", tabKey: source.tabKey, groupId: over.groupId, index });
+      const old = current.groups[destination.groupId]?.tabs.indexOf(source.tabKey) ?? -1;
+      const index = deskInsertionIndex(old, destination.index, false);
+      dispatch({ type: "move", tabKey: source.tabKey, groupId: destination.groupId, index });
     } else if (destination.edge) {
       dispatch({
         type: "split",
@@ -953,6 +1002,7 @@ export default function DeskWorkspace() {
                         )}
                         <GroupTabs
                           group={group}
+                          hint={hint}
                           onMenu={(key, pos) => {
                             void showMenu(groupId, key, pos);
                           }}
