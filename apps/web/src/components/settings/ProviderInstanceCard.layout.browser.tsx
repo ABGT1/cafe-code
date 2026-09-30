@@ -134,6 +134,36 @@ function cardFixture(kind: "minimal" | "multiple" | "login", realistic: boolean)
   };
 }
 
+function usageResetCardFixture(availableCount: 1 | 0 | null | undefined) {
+  const fixture = cardFixture("multiple", true);
+  const availabilityId =
+    availableCount === undefined ? "omitted" : availableCount === null ? "null" : availableCount;
+  const instanceId = ProviderInstanceId.make(`codex-reset-${availabilityId}`);
+  const accountRateLimits: ServerProviderAccountRateLimits = {
+    checkedAt,
+    rateLimits: {
+      ...bucket,
+      // Only the weekly window is low. A positive account-wide reset count
+      // should make the action available without inventing per-window credits
+      // or requiring the otherwise healthy primary window to be exhausted.
+      secondary: { ...bucket.secondary, usedPercent: 99 },
+    },
+    ...(availableCount === undefined
+      ? {}
+      : { rateLimitResetCredits: availableCount === null ? null : { availableCount } }),
+  };
+  return {
+    ...fixture,
+    instanceId,
+    provider: {
+      ...fixture.provider,
+      instanceId,
+      auth: { ...fixture.provider.auth, email: privateEmail },
+      accountRateLimits,
+    },
+  };
+}
+
 let mounted: Awaited<ReturnType<typeof render>> | undefined;
 let host: HTMLDivElement | undefined;
 
@@ -318,6 +348,124 @@ function expectControlsWithinHeader(card: HTMLElement, inline: boolean) {
 }
 
 describe("Provider instance card layout", () => {
+  it.each([320, 520, 1152].flatMap((width) => [80, 100, 130].map((scale) => ({ width, scale }))))(
+    "keeps eligible reset actions in the header without a quota spacer at $width px / $scale% scale",
+    async ({ width, scale }) => {
+      const availabilities = [1, 0, null, undefined] as const;
+      const { fixtures, host } = await mountCards(
+        width,
+        scale,
+        true,
+        availabilities.map(usageResetCardFixture),
+      );
+      const cards = Array.from(host.querySelectorAll<HTMLElement>("[data-provider-card]"));
+      expect(cards).toHaveLength(availabilities.length);
+      const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+      const quotaGaps: number[] = [];
+
+      for (const [index, card] of cards.entries()) {
+        expectControlsWithinHeader(card, card.clientWidth >= 32 * rem);
+        const actions = card.querySelector<HTMLElement>("[data-provider-card-actions]")!;
+        const details = card.querySelector<HTMLElement>("[data-provider-card-details]")!;
+        const auth = details.firstElementChild!;
+        const quota = card.querySelector<HTMLElement>("[data-account-quota]")!;
+        const quotaScroll = card.querySelector<HTMLElement>("[data-account-quota-scroll]")!;
+        const resetButton = Array.from(card.querySelectorAll("button")).find(
+          (button) => button.textContent?.trim() === "Redeem reset",
+        );
+        if (availabilities[index] === 1) {
+          expect(resetButton).toBeDefined();
+          expect(actions.contains(resetButton!)).toBe(true);
+          expect(quota.contains(resetButton!)).toBe(false);
+        } else {
+          expect(resetButton).toBeUndefined();
+        }
+
+        // Measure the first quota facts, not the outer quota container: an
+        // action rendered above those facts can leave an empty full-width row
+        // even when the container itself has the correct authentication gap.
+        // These cards differ only in reset availability, so that gap must be
+        // independent of whether a reset action is visible or unavailable.
+        const quotaGap =
+          quotaScroll.getBoundingClientRect().top - auth.getBoundingClientRect().bottom;
+        quotaGaps.push(quotaGap);
+        expect(quotaGap).toBeGreaterThanOrEqual(0);
+        expect(quotaGap).toBeLessThanOrEqual(0.5 * rem + 1);
+        expect(quota.dataset.accountQuotaLayout).toBe("settings");
+        expect(quota.getBoundingClientRect().width).toBeCloseTo(
+          details.getBoundingClientRect().width,
+          0,
+        );
+
+        const windows = Array.from(
+          quota.querySelectorAll<HTMLElement>("[data-account-quota-window]"),
+        );
+        expect(windows).toHaveLength(2);
+        for (const quotaWindow of windows) expectContentSizedQuotaWindow(quotaWindow);
+        const percentages = Array.from(quota.querySelectorAll("span"))
+          .map((span) => span.textContent)
+          .filter((text) => /^\d+(?:\.\d+)?% left$/.test(text ?? ""));
+        expect(percentages).toEqual(["75% left", "1% left"]);
+        const resetCount = Array.from(quota.querySelectorAll("p")).find((element) =>
+          element.textContent?.startsWith("Usage limit resets available:"),
+        );
+        const availableCount = availabilities[index];
+        if (typeof availableCount === "number") {
+          expect(resetCount?.textContent).toBe(`Usage limit resets available: ${availableCount}`);
+          expect(quota.lastElementChild).toBe(resetCount);
+          expect(quotaScroll.contains(resetCount!)).toBe(false);
+          expect(resetCount!.getBoundingClientRect().top).toBeGreaterThanOrEqual(
+            quotaScroll.getBoundingClientRect().bottom - 1,
+          );
+        } else {
+          expect(resetCount).toBeUndefined();
+        }
+        for (const element of [quota, quotaScroll]) expectNoHorizontalOverflow(element);
+        expect(card.textContent).not.toContain(privateEmail);
+        expect(card.innerHTML).not.toContain(privateEmail);
+        expect(fixtures[index]!.onUpdate).not.toHaveBeenCalled();
+      }
+      expect(Math.max(...quotaGaps) - Math.min(...quotaGaps)).toBeLessThanOrEqual(1);
+      expectNoHorizontalOverflow(host);
+      expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
+      await expect
+        .element(page.getByRole("button", { name: "Redeem reset", exact: true }))
+        .toBeVisible();
+
+      // The extra reset control must not cover the usual controls when the
+      // action row wraps. Only injected callbacks are invoked here; opening
+      // the reset preview would cross the provider-I/O boundary of this suite.
+      const eligible = fixtures[0]!;
+      await page
+        .getByRole("button", { name: `Open ${eligible.displayName} settings`, exact: true })
+        .first()
+        .click();
+      expect(eligible.onSettingsOpenChange).toHaveBeenCalledExactlyOnceWith(true);
+      await page
+        .getByRole("button", {
+          name: `Clear ${eligible.displayName} as default provider`,
+          exact: true,
+        })
+        .first()
+        .click();
+      expect(eligible.onSetDefaultProvider).toHaveBeenCalledExactlyOnceWith(false);
+      await page
+        .getByRole("button", { name: `Restart ${eligible.displayName} runtime`, exact: true })
+        .first()
+        .click();
+      expect(eligible.onRestartRuntime).toHaveBeenCalledOnce();
+      await page
+        .getByRole("switch", { name: `Enable ${eligible.displayName}`, exact: true })
+        .first()
+        .click();
+      expect(eligible.onUpdate).toHaveBeenCalledExactlyOnceWith({
+        ...eligible.instance,
+        enabled: false,
+      });
+      expect(api.ensureLocalApi).not.toHaveBeenCalled();
+    },
+  );
+
   it.each([320, 520, 760].flatMap((width) => [80, 100, 130].map((scale) => ({ width, scale }))))(
     "keeps header actions aligned and quota facts naturally spaced at $width px / $scale% scale",
     async ({ width, scale }) => {

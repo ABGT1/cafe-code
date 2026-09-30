@@ -1097,6 +1097,15 @@ export function ProviderInstanceCard({
                 Log In
               </Button>
             ) : null}
+            {/* Keep the optional reset alongside the existing controls. A
+                standalone quota action row would push all usage facts down
+                whenever a reset becomes available, leaving a blank strip. */}
+            {accountQuota ? (
+              <ProviderUsageResetButton
+                provider={liveProvider}
+                request={(input) => ensureLocalApi().server.usageReset(input)}
+              />
+            ) : null}
             {onRestartRuntime ? (
               <Tooltip>
                 <TooltipTrigger
@@ -1190,16 +1199,7 @@ export function ProviderInstanceCard({
           {authRowNode}
           {accountQuota ? (
             <div className="w-full [&_[data-account-quota-scroll]]:[scrollbar-gutter:stable]">
-              <ProviderAccountQuotaDetails
-                presentation={accountQuota}
-                layout="settings"
-                action={
-                  <ProviderUsageResetButton
-                    provider={liveProvider}
-                    request={(input) => ensureLocalApi().server.usageReset(input)}
-                  />
-                }
-              />
+              <ProviderAccountQuotaDetails presentation={accountQuota} layout="settings" />
             </div>
           ) : null}
         </div>
