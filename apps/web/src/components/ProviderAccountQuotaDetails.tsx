@@ -40,10 +40,9 @@ export function ProviderAccountQuotaDetails(props: {
       data-account-quota-layout={layout}
     >
       {props.action ? (
-        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
-          <span>Usage</span>
-          {props.action}
-        </div>
+        // An ineligible reset action renders no button. Display contents avoids
+        // leaving an empty heading row (and flex gap) in that case.
+        <div className="contents [&>button]:self-end">{props.action}</div>
       ) : null}
       {presentation.buckets.length ? (
         <div

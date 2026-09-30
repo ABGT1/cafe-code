@@ -259,7 +259,7 @@ describe("codexRateLimits", () => {
     },
     {
       credits: { hasCredits: false, unlimited: true, balance: "9007199254740993.0001" },
-      expected: ["Credits: Unlimited (balance: 9007199254740993)"],
+      expected: ["Credits: Unlimited (balance: 9,007,199,254,740,993)"],
     },
     {
       credits: { hasCredits: true, unlimited: true, balance: "0" },
@@ -303,7 +303,7 @@ describe("codexRateLimits", () => {
     },
     {
       credits: { hasCredits: true, unlimited: false, balance: "9007199254740993.0001" },
-      expected: ["Credits: 9007199254740993 available"],
+      expected: ["Credits: 9,007,199,254,740,993 available"],
     },
     {
       credits: { hasCredits: false, unlimited: false, balance: "9.99" },
@@ -349,9 +349,9 @@ describe("codexRateLimits", () => {
         credits: { hasCredits: true, unlimited: false, balance: "10000000000000000.00001" },
       },
     };
-    const text = "Credits: 10000000000000000 available";
+    const text = "Credits: 10,000,000,000,000,000 available";
     expect(formatCodexRateLimitPresentation(input)?.buckets[0]?.details).toEqual([
-      { label: "Credits", value: "10000000000000000 available", text },
+      { label: "Credits", value: "10,000,000,000,000,000 available", text },
     ]);
     expect(formatCodexRateLimitInlineText(input)).toBe(text);
   });
@@ -362,6 +362,11 @@ describe("codexRateLimits", () => {
     ["+000.00", "0"],
     ["120.000", "120"],
     ["545.0317780000", "545.03"],
+    ["62492.22", "62,492.22"],
+    ["999.995", "1,000"],
+    ["1000.005", "1,000.01"],
+    ["-12345.678", "-12,345.68"],
+    ["+0001000.00", "1,000"],
     ["1.200", "1.2"],
     ["1.00499999999999999999", "1"],
     ["1.005", "1.01"],
@@ -375,11 +380,11 @@ describe("codexRateLimits", () => {
     ["-.004", "0"],
     ["+0009.995", "10"],
     ["120.", "120"],
-    ["9007199254740993.995", "9007199254740994"],
-    ["123456789012345678901234567890.0000001234", "123456789012345678901234567890"],
-    ["999999999999999999999999999999.995", "1000000000000000000000000000000"],
+    ["9007199254740993.995", "9,007,199,254,740,994"],
+    ["123456789012345678901234567890.0000001234", "123,456,789,012,345,678,901,234,567,890"],
+    ["999999999999999999999999999999.995", "1,000,000,000,000,000,000,000,000,000,000"],
     [`0.${"0".repeat(400)}1`, "0"],
-  ])("rounds only the displayed balance %s to %s", (balance, expected) => {
+  ])("rounds and groups only the displayed balance %s to %s", (balance, expected) => {
     const credits = Object.freeze({ hasCredits: true, unlimited: false, balance });
     const input = Object.freeze({
       checkedAt: "2026-09-30T00:00:00.000Z",

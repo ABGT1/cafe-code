@@ -381,7 +381,9 @@ describe("Provider instance card layout", () => {
       await expect.element(page.getByText(privateEmail, { exact: true })).not.toBeInTheDocument();
       await expect
         .element(
-          page.getByText("Credits: 123456789012345678901234567890 available", { exact: true }),
+          page.getByText("Credits: 123,456,789,012,345,678,901,234,567,890 available", {
+            exact: true,
+          }),
         )
         .toBeVisible();
       expect(host.textContent).not.toContain("Credit balance:");

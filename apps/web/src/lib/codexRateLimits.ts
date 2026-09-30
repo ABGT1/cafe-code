@@ -231,7 +231,13 @@ function formatCreditBalance(balance: string): string | null {
   const whole = digits.slice(0, -2);
   const remainder = digits.slice(-2).replace(/0+$/u, "");
   const sign = decimal[1] === "-" && (whole !== "0" || remainder !== "") ? "-" : "";
-  return `${sign}${whole}${remainder ? `.${remainder}` : ""}`;
+  // Group only the rounded integer, without floating-point conversion. Chunk
+  // once in linear time even for unusually long provider-supplied decimals.
+  const groups: string[] = [];
+  for (let end = whole.length; end > 0; end -= 3) {
+    groups.push(whole.slice(Math.max(0, end - 3), end));
+  }
+  return `${sign}${groups.toReversed().join(",")}${remainder ? `.${remainder}` : ""}`;
 }
 
 function formatCreditValue(
