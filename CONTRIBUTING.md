@@ -50,6 +50,25 @@ If the change depends on motion, timing, transitions, or interaction details, in
 
 If we have to guess what changed, we are much less likely to review it.
 
+## Verification Resource Budget
+
+Use the repository-pinned Node and Corepack Yarn versions described in
+[Run From Source](README.md#run-from-source). All quality gates remain required.
+
+CI and release verification set `NODE_OPTIONS=--max-old-space-size=4096` only
+for their Typecheck step and run `corepack yarn typecheck --concurrency=1`.
+This checks the entire package graph, one compiler at a time. A cold server
+compile exceeds the approximately 2 GiB default V8 heap on hosted macOS;
+sequential scheduling leaves room for native memory overhead on smaller runners.
+The heap ceiling is not a total process memory limit.
+
+Use that same environment setting and command when reproducing CI typechecks.
+A warm TypeScript build-info cache can hide the cold compiler's memory demand,
+so a warm local pass alone does not qualify a resource-budget change. Keep heap
+options scoped to verification rather than tests, builds, or shipped processes.
+Workflow regression tests enforce this boundary; fresh GitHub quality and native
+artifact jobs provide the platform checks.
+
 ## Issues First
 
 If you are thinking about a non-trivial change, open an issue first.

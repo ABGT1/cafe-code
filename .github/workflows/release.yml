@@ -91,7 +91,16 @@ jobs:
         run: |
           corepack yarn fmt:check
           corepack yarn lint
-          corepack yarn typecheck
+
+      - name: Typecheck
+        # Match CI's cold compiler budget without passing these options to
+        # tests, desktop builds, or native runtime smoke children.
+        env:
+          NODE_OPTIONS: "--max-old-space-size=4096"
+        run: corepack yarn typecheck --concurrency=1
+
+      - name: Test and build desktop pipeline
+        run: |
           corepack yarn test
           corepack yarn build:desktop
 

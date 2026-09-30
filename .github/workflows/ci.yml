@@ -84,7 +84,12 @@ jobs:
         run: corepack yarn lint
 
       - name: Typecheck
-        run: corepack yarn typecheck
+        # A cold server compile exceeds macOS's default ~2 GiB V8 heap.
+        # Run one compiler at a time so several 4 GiB heaps cannot compete
+        # on a 7 GiB runner. Turbo passes NODE_OPTIONS through strict env mode.
+        env:
+          NODE_OPTIONS: "--max-old-space-size=4096"
+        run: corepack yarn typecheck --concurrency=1
 
       - name: Test
         run: corepack yarn test
