@@ -17,13 +17,25 @@ describe("launcher", () => {
     });
   });
 
-  it("recognizes npm bin symlinks as direct launcher execution", () => {
+  it("recognizes npm bin symlinks as direct launcher execution", (context) => {
     const launcherPath = fileURLToPath(new URL("./launcher.ts", import.meta.url));
     const testDir = mkdtempSync(join(tmpdir(), "cafe-code-launcher-"));
     const symlinkPath = join(testDir, "cafe-code");
 
     try {
-      symlinkSync(launcherPath, symlinkPath);
+      try {
+        symlinkSync(launcherPath, symlinkPath);
+      } catch (error) {
+        if (
+          process.platform === "win32" &&
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "EPERM"
+        ) {
+          context.skip("Windows symlink privileges are unavailable");
+        }
+        throw error;
+      }
       assert.equal(
         isCliEntrypoint(symlinkPath, pathToFileURL(realpathSync(launcherPath)).href),
         true,

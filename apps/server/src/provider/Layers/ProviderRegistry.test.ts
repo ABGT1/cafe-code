@@ -1925,6 +1925,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
       //
       it.effect("re-probes when settings change the codex binaryPath", () =>
         Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const isolatedCodexHome = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "cafe-provider-registry-codex-home-",
+          });
           const firstMissing = `t3code_codex_first_`;
           const secondMissing = `t3code_codex_second_`;
           const reprobeModel = "settings-reprobe-marker";
@@ -1932,7 +1936,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             decodeServerSettings(
               deepMerge(encodedDefaultServerSettings, {
                 providers: {
-                  codex: { enabled: true, binaryPath: firstMissing },
+                  codex: { enabled: true, binaryPath: firstMissing, homePath: isolatedCodexHome },
                   claudeAgent: { enabled: false },
                 },
               }),
@@ -1996,6 +2000,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
                 codex: {
                   enabled: true,
                   binaryPath: secondMissing,
+                  homePath: isolatedCodexHome,
                   customModels: [reprobeModel],
                 },
               },
@@ -2891,7 +2896,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           }),
       );
 
-      it.effect("ignores Codex auth metadata when the auth file is a symlink", () =>
+      it.effect("ignores Codex auth metadata when the auth file is a symlink", (context) =>
         Effect.gen(function* () {
           const fileSystem = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
@@ -2916,7 +2921,22 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               },
             }),
           );
-          yield* fileSystem.symlink(targetPath, path.join(homePath, "auth.json"));
+          yield* fileSystem.symlink(targetPath, path.join(homePath, "auth.json")).pipe(
+            Effect.catch((error) => {
+              const cause = error.reason.cause;
+              if (
+                process.platform === "win32" &&
+                cause instanceof Error &&
+                "code" in cause &&
+                cause.code === "EPERM"
+              ) {
+                return Effect.sync(() =>
+                  context.skip("Windows symlink privileges are unavailable"),
+                );
+              }
+              return Effect.fail(error);
+            }),
+          );
 
           const status = yield* checkCodexCliProviderStatus(decodeCodexSettings({ homePath })).pipe(
             Effect.provide(
