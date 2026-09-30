@@ -324,7 +324,9 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
   const maxProviderCost = Math.max(0, ...view.providers.map((entry) => entry.cost));
 
   return (
-    <>
+    // This content also appears in Atrium. Container queries must live here,
+    // rather than assume either surface occupies the full browser viewport.
+    <div className="@container/usage-cost min-w-0" data-usage-cost-layout>
       <div className="flex justify-end px-4 pt-3 sm:px-5">
         <div className="flex overflow-hidden rounded-md border border-border/70 text-[11px]">
           {(["cost", "tokens"] as const).map((option) => (
@@ -345,7 +347,10 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
           ))}
         </div>
       </div>
-      <div className="grid gap-5 px-4 py-4 sm:px-5 lg:grid-cols-[minmax(0,320px)_minmax(0,1fr)]">
+      <div
+        className="grid gap-5 px-4 py-4 sm:px-5 @min-[52rem]/usage-cost:grid-cols-[minmax(0,22rem)_minmax(0,1fr)]"
+        data-usage-cost-overview
+      >
         {/* Hero + provider split */}
         <div className="min-w-0">
           <div className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
@@ -456,12 +461,19 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
               </span>
             ) : null}
           </div>
-          <UsageAreaChart labels={chart.labels} series={chart.series} format={chart.format} />
+          <UsageAreaChart
+            labels={chart.labels}
+            series={chart.series}
+            format={chart.format}
+            displayHeight="clamp(12rem, 24cqw, 20rem)"
+          />
         </div>
       </div>
 
       {/* Composition tiles */}
-      <div className="grid grid-cols-2 divide-x divide-y divide-border/60 border-t border-border/60 sm:grid-cols-3 lg:grid-cols-5 lg:divide-y-0">
+      {/* Fit readable metrics instead of dividing a narrow settings column
+          into five cells merely because the overall window is wide. */}
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,17rem),1fr))] divide-x divide-y divide-border/60 border-t border-border/60">
         <StatTile
           id="processed"
           label="Processed tokens"
@@ -511,7 +523,10 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
       </div>
 
       {/* Breakdown + cost quality */}
-      <div className="grid gap-5 border-t border-border/60 px-4 py-4 sm:px-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,240px)]">
+      <div
+        className="grid gap-5 border-t border-border/60 px-4 py-4 sm:px-5 @min-[52rem]/usage-cost:grid-cols-[minmax(0,1fr)_minmax(0,18rem)]"
+        data-usage-cost-breakdown
+      >
         <div className="min-w-0 overflow-x-auto">
           <table className="w-full min-w-[420px] border-collapse text-sm">
             <thead>
@@ -609,7 +624,7 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
           </p>
         </div>
       </div>
-    </>
+    </div>
   );
 }
 

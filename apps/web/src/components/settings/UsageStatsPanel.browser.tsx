@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
 import { ProviderDriverKind, type UsageStatsGetResult } from "@cafecode/contracts";
 
+import { applyInterfaceScalePercent } from "../../interfaceScale";
+import { resetUsageStatsDetailResourceForTests } from "../stats/usageStatsDetailResource";
 import { UsageCostContent } from "./UsageCostSection";
 import { UsageStatsPanel } from "./UsageStatsPanel";
 
@@ -123,6 +125,47 @@ function createUsageDetail(): UsageStatsGetResult {
   } as unknown as UsageStatsGetResult;
 }
 
+/** Synthetic long-running usage keeps the layout checks independent of providers. */
+function createBillionScaleUsageDetail(): UsageStatsGetResult {
+  const baseline = createUsageDetail();
+  const scale = 1_000;
+  const scaledToday = {
+    ...baseline.today,
+    generatingMs: baseline.today.generatingMs * scale,
+    inputTokens: baseline.today.inputTokens * scale,
+    cachedInputTokens: baseline.today.cachedInputTokens * scale,
+    cacheWriteInputTokens: baseline.today.cacheWriteInputTokens * scale,
+    outputTokens: baseline.today.outputTokens * scale,
+    reasoningOutputTokens: baseline.today.reasoningOutputTokens * scale,
+    userMessages: baseline.today.userMessages * scale,
+  };
+  return {
+    ...baseline,
+    totals: {
+      generatingMs: baseline.totals.generatingMs * scale,
+      inputTokens: baseline.totals.inputTokens * scale,
+      cachedInputTokens: baseline.totals.cachedInputTokens * scale,
+      cacheWriteInputTokens: baseline.totals.cacheWriteInputTokens * scale,
+      outputTokens: baseline.totals.outputTokens * scale,
+      reasoningOutputTokens: baseline.totals.reasoningOutputTokens * scale,
+      userMessages: baseline.totals.userMessages * scale,
+    },
+    today: scaledToday,
+    days: Array.from({ length: 7 }, (_, index) => ({
+      ...scaledToday,
+      day: `2026-07-${15 + index}` as typeof scaledToday.day,
+    })),
+    tokenBreakdown: baseline.tokenBreakdown.map((entry) => ({
+      ...entry,
+      inputTokens: entry.inputTokens * scale,
+      cachedInputTokens: entry.cachedInputTokens * scale,
+      cacheWriteInputTokens: entry.cacheWriteInputTokens * scale,
+      outputTokens: entry.outputTokens * scale,
+      reasoningOutputTokens: entry.reasoningOutputTokens * scale,
+    })),
+  };
+}
+
 function requiredElement(selector: string): HTMLElement {
   const element = document.querySelector<HTMLElement>(selector);
   expect(element).not.toBeNull();
@@ -146,6 +189,50 @@ function expectFullBeforeCompact(context: string): void {
   expect(compact.getAttribute("aria-hidden")).toBe("true");
 }
 
+function expectNoHorizontalOverflow(element: HTMLElement): void {
+  expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth + 1);
+}
+
+function expectCompositionNumbersOnOneLine(): void {
+  for (const id of ["processed", "cached", "uncached", "output"]) {
+    const figure = requiredElement(`[data-usage-token-full="composition-${id}"]`);
+    const numericText = Array.from(figure.childNodes).find(
+      (node) => node.nodeType === Node.TEXT_NODE && /^[\d,]+/.test(node.textContent ?? ""),
+    );
+    expect(numericText).toBeDefined();
+    const digitLength = numericText!.textContent!.match(/^[\d,]+/)![0].length;
+    // Measure the digits themselves: the supporting word "tokens" may wrap,
+    // but a billion-scale counter must remain readable as one complete number.
+    const range = document.createRange();
+    range.setStart(numericText!, 0);
+    range.setEnd(numericText!, digitLength);
+    expect(Array.from(range.getClientRects()).filter((rect) => rect.width > 0)).toHaveLength(1);
+    expectNoHorizontalOverflow(figure);
+  }
+}
+
+function expectOverviewStacked(): void {
+  const overview = requiredElement("[data-usage-cost-overview]");
+  const hero = overview.children[0]!.getBoundingClientRect();
+  const chart = overview.children[1]!.getBoundingClientRect();
+  expect(chart.top).toBeGreaterThanOrEqual(hero.bottom);
+  expect(Math.abs(chart.left - hero.left)).toBeLessThanOrEqual(1);
+}
+
+function settleLayoutCountersImmediately(): void {
+  const matchMedia = window.matchMedia.bind(window);
+  // Geometry cases exercise the supported reduced-motion path so unrelated
+  // odometer timing cannot change measured text widths. Other media queries
+  // and the existing intermediate-counter animation test remain unaffected.
+  vi.spyOn(window, "matchMedia").mockImplementation((query) => {
+    const media = matchMedia(query);
+    if (query === "(prefers-reduced-motion: reduce)") {
+      Object.defineProperty(media, "matches", { value: true });
+    }
+    return media;
+  });
+}
+
 describe("UsageStatsPanel", () => {
   let mounted:
     | (Awaited<ReturnType<typeof render>> & {
@@ -153,8 +240,15 @@ describe("UsageStatsPanel", () => {
         unmount?: () => Promise<void>;
       })
     | null = null;
+  let originalViewport = { height: window.innerHeight, width: window.innerWidth };
+  let originalRootFontSize = "";
+  let originalRootFontPriority = "";
 
   beforeEach(() => {
+    originalViewport = { height: window.innerHeight, width: window.innerWidth };
+    originalRootFontSize = document.documentElement.style.getPropertyValue("font-size");
+    originalRootFontPriority = document.documentElement.style.getPropertyPriority("font-size");
+    resetUsageStatsDetailResourceForTests();
     usageHarness.reset(createUsageDetail(), snapshot);
   });
 
@@ -163,6 +257,22 @@ describe("UsageStatsPanel", () => {
     await teardown?.call(mounted).catch(() => {});
     mounted = null;
     document.body.innerHTML = "";
+    vi.restoreAllMocks();
+    if (originalRootFontSize) {
+      document.documentElement.style.setProperty(
+        "font-size",
+        originalRootFontSize,
+        originalRootFontPriority,
+      );
+    } else {
+      document.documentElement.style.removeProperty("font-size");
+    }
+    if (
+      window.innerWidth !== originalViewport.width ||
+      window.innerHeight !== originalViewport.height
+    ) {
+      await page.viewport(originalViewport.width, originalViewport.height);
+    }
   });
 
   it("renders stored provider and model token attribution with earlier usage separated", async () => {
@@ -391,4 +501,105 @@ describe("UsageStatsPanel", () => {
       await page.viewport(originalViewport.width, originalViewport.height);
     }
   });
+
+  it("uses the wide space remaining beside the sidebar for the chart and complete metrics", async () => {
+    await page.viewport(1_800, 1_000);
+    applyInterfaceScalePercent(100);
+    settleLayoutCountersImmediately();
+    const usage = createBillionScaleUsageDetail();
+    usageHarness.reset(usage, usage);
+    mounted = await render(
+      <div className="flex h-dvh min-w-0 w-full">
+        <aside data-usage-test-sidebar style={{ width: 280, flexShrink: 0 }}>
+          Settings navigation
+        </aside>
+        <UsageStatsPanel />
+      </div>,
+    );
+    await vi.waitFor(() => expect(displayedRawCount("processed")).toBe(3_000_000_000));
+
+    const sidebar = requiredElement("[data-usage-test-sidebar]").getBoundingClientRect();
+    const layout = requiredElement("[data-usage-cost-layout]");
+    const bounds = layout.getBoundingClientRect();
+    // Allow the page's ordinary gutters while rejecting the old 768px cap.
+    expect(bounds.width).toBeGreaterThan(window.innerWidth - sidebar.width - 128);
+    expect(bounds.left).toBeGreaterThan(sidebar.right);
+    const chart = requiredElement('[data-usage-cost-overview] svg[role="img"]');
+    expect(chart.getBoundingClientRect().width).toBeGreaterThan(800);
+    expect(chart.getBoundingClientRect().height).toBeGreaterThan(260);
+    const tiles = Array.from(document.querySelectorAll("[data-usage-composition-tile]"));
+    expect(tiles).toHaveLength(5);
+    for (const tile of tiles) {
+      expect(
+        Math.abs(tile.getBoundingClientRect().top - tiles[0]!.getBoundingClientRect().top),
+      ).toBeLessThanOrEqual(1);
+    }
+    expectCompositionNumbersOnOneLine();
+    expectNoHorizontalOverflow(layout);
+    expectNoHorizontalOverflow(document.documentElement);
+  });
+
+  it("stacks in a narrow parent inside a wide viewport and grows the chart with its parent", async () => {
+    await page.viewport(1_800, 1_000);
+    applyInterfaceScalePercent(100);
+    settleLayoutCountersImmediately();
+    const usage = createBillionScaleUsageDetail();
+    const content = (width: number) => (
+      <div data-usage-test-parent style={{ width, maxWidth: "100%" }}>
+        <UsageCostContent usage={usage} />
+      </div>
+    );
+    mounted = await render(content(640));
+    expectOverviewStacked();
+    const narrowChart = requiredElement(
+      '[data-usage-cost-overview] svg[role="img"]',
+    ).getBoundingClientRect();
+    expect(narrowChart.width).toBeGreaterThan(540);
+    expectNoHorizontalOverflow(requiredElement("[data-usage-test-parent]"));
+
+    await mounted.rerender(content(1_320));
+    const wideChart = requiredElement(
+      '[data-usage-cost-overview] svg[role="img"]',
+    ).getBoundingClientRect();
+    expect(wideChart.width).toBeGreaterThan(narrowChart.width + 200);
+    expect(wideChart.height).toBeGreaterThan(narrowChart.height + 80);
+    expectCompositionNumbersOnOneLine();
+    expectNoHorizontalOverflow(requiredElement("[data-usage-test-parent]"));
+  });
+
+  it.each([80, 130])(
+    "contains billion-scale usage at %i%% interface scale in wide and 320px panels",
+    async (scale) => {
+      await page.viewport(1_800, 1_000);
+      applyInterfaceScalePercent(scale);
+      settleLayoutCountersImmediately();
+      const usage = createBillionScaleUsageDetail();
+      usageHarness.reset(usage, usage);
+      mounted = await render(
+        <div className="flex h-dvh min-w-0 w-full">
+          <aside style={{ width: 280, flexShrink: 0 }}>Settings navigation</aside>
+          <UsageStatsPanel />
+        </div>,
+      );
+      await vi.waitFor(() => expect(displayedRawCount("processed")).toBe(3_000_000_000));
+      expectCompositionNumbersOnOneLine();
+      expectNoHorizontalOverflow(requiredElement("[data-usage-cost-layout]"));
+      expectNoHorizontalOverflow(document.documentElement);
+
+      await page.viewport(320, 1_000);
+      await mounted.rerender(
+        <div className="flex h-dvh min-w-0 w-full">
+          <UsageStatsPanel />
+        </div>,
+      );
+      await vi.waitFor(() => expect(displayedRawCount("processed")).toBe(3_000_000_000));
+      expectOverviewStacked();
+      const layout = requiredElement("[data-usage-cost-layout]");
+      expectNoHorizontalOverflow(layout);
+      expectNoHorizontalOverflow(document.documentElement);
+      for (const tile of document.querySelectorAll<HTMLElement>("[data-usage-composition-tile]")) {
+        expectNoHorizontalOverflow(tile);
+      }
+    },
+  );
 });

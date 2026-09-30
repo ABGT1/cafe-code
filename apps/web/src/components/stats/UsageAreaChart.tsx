@@ -31,6 +31,9 @@ export interface UsageAreaChartProps {
   readonly format: (value: number) => string;
   readonly className?: string;
   readonly height?: number;
+  /** CSS display height can follow the caller's container width while the
+   * stable SVG coordinate height keeps data and pointer indexes unchanged. */
+  readonly displayHeight?: CSSProperties["height"];
 }
 
 const PADDING = { top: 14, right: 8, bottom: 20, left: 8 };
@@ -63,6 +66,7 @@ export function UsageAreaChart({
   format,
   className,
   height = 190,
+  displayHeight = height,
 }: UsageAreaChartProps) {
   const gradientId = useId();
   const [hover, setHover] = useState<number | null>(null);
@@ -97,7 +101,7 @@ export function UsageAreaChart({
           "flex items-center justify-center rounded-xl border border-border/60 text-xs text-muted-foreground",
           className,
         )}
-        style={{ height }}
+        style={{ height: displayHeight }}
       >
         No activity recorded yet
       </div>
@@ -112,7 +116,7 @@ export function UsageAreaChart({
         viewBox={`0 0 ${width} ${height}`}
         preserveAspectRatio="none"
         className="block w-full"
-        style={{ height }}
+        style={{ height: displayHeight }}
         role="img"
         aria-label={`Daily usage across ${series.length} providers`}
         onPointerLeave={() => setHover(null)}

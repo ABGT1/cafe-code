@@ -82,11 +82,11 @@ function useLiveTotals(snapshot: UsageStatsSnapshot | null) {
 
 function StatTile({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex min-w-0 flex-col items-center gap-1.5 px-2 py-5 text-center sm:px-3 sm:py-6">
+    <div className="flex min-w-0 flex-col items-center gap-1.5 px-2 py-5 text-center @min-[40rem]/usage-page:px-3 @min-[40rem]/usage-page:py-6">
       <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted-foreground/70 sm:text-[11px]">
         {label}
       </span>
-      <span className="text-xl font-semibold leading-none tracking-tight text-foreground tabular-nums sm:text-2xl md:text-[1.75rem]">
+      <span className="max-w-full break-words text-xl font-semibold leading-tight tracking-tight text-foreground tabular-nums [overflow-wrap:anywhere] @min-[40rem]/usage-page:text-2xl @min-[64rem]/usage-page:text-[1.75rem]">
         {value}
       </span>
     </div>
@@ -256,7 +256,9 @@ export function UsageStatsPanel() {
   const chatsDisplay = useCountUp(totals?.userMessages ?? 0);
 
   return (
-    <SettingsPageContainer>
+    // Usage is a dashboard, not a narrow settings form. Its own container
+    // tracks the space left by the sidebar and the user's interface scale.
+    <SettingsPageContainer className="@container/usage-page min-w-0 max-w-none">
       <SettingsSection
         title="Usage"
         headerAction={
@@ -274,7 +276,7 @@ export function UsageStatsPanel() {
         }
       >
         {totals ? (
-          <div className="grid grid-cols-3 divide-x divide-border/60">
+          <div className="grid grid-cols-1 divide-x divide-y divide-border/60 @min-[40rem]/usage-page:grid-cols-3 @min-[40rem]/usage-page:divide-y-0">
             <StatTile label="Tokens generated" value={integerFormat.format(tokensDisplay)} />
             <StatTile label="Chats sent" value={integerFormat.format(chatsDisplay)} />
             <StatTile
@@ -289,7 +291,7 @@ export function UsageStatsPanel() {
                 Usage stats are unavailable right now. Reconnect to the server and try again.
               </p>
             ) : (
-              <div className="grid grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 gap-4 @min-[40rem]/usage-page:grid-cols-3">
                 {[0, 1, 2].map((column) => (
                   <div key={column} className="flex flex-col items-center gap-2">
                     <Skeleton className="h-3 w-20" />
