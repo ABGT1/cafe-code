@@ -36,7 +36,10 @@ const handleMethod = (message: Record<string, unknown>) => {
   switch (method) {
     case "initialize": {
       respond(message.id as number | string, {
-        userAgent: "mock-codex-app-server",
+        userAgent:
+          process.argv[2] === "--echo-argv"
+            ? JSON.stringify(process.argv.slice(3))
+            : "mock-codex-app-server",
         codexHome: process.cwd(),
         platformFamily: process.platform === "win32" ? "windows" : "unix",
         platformOs: process.platform === "darwin" ? "macos" : process.platform,

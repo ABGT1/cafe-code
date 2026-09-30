@@ -389,7 +389,11 @@ export const layerCommand = (
         ...(options.cwd ? { cwd: options.cwd } : {}),
         ...(options.env ? { env: { ...process.env, ...options.env } } : {}),
         forceKillAfter: DEFAULT_APP_SERVER_FORCE_KILL_AFTER,
-        shell: process.platform === "win32",
+        // Windows batch shims and bare commands still need command-shell resolution.
+        // Native executables must receive structured argv: a shell can split an
+        // executable under Program Files or interpret metacharacters in arguments.
+        // POSIX keeps its existing direct-child path.
+        shell: process.platform === "win32" && !/\.(?:exe|com)$/i.test(options.command),
       });
       return yield* spawner.spawn(command).pipe(
         Effect.mapError(

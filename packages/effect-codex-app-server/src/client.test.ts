@@ -3,6 +3,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
@@ -307,13 +308,31 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
     }),
   );
 
-  it.effect("initializes a command-backed app-server client", () =>
+  const literalCommandArgs = [
+    "space in argument",
+    'literal"quote',
+    "literal&pipe|",
+    "%CAFE_ARG%",
+    "",
+  ];
+  it.effect.each([
+    {
+      name: "initializes a command-backed app-server client",
+      args: [],
+      expected: "mock-codex-app-server",
+    },
+    {
+      name: "preserves literal native executable arguments through command-backed initialization",
+      args: ["--echo-argv", ...literalCommandArgs],
+      expected: JSON.stringify(literalCommandArgs),
+    },
+  ])("$name", ({ args, expected }) =>
     Effect.gen(function* () {
       const path = yield* Path.Path;
       const scope = yield* Scope.make();
       const clientLayer = CodexClient.layerCommand({
         command: process.execPath,
-        args: [yield* mockPeerPath],
+        args: [yield* mockPeerPath, ...args],
         cwd: path.join(import.meta.dirname, ".."),
       });
       const context = yield* Layer.buildWithScope(clientLayer, scope);
@@ -333,7 +352,52 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
         });
       }).pipe(Effect.provide(context), Effect.ensuring(Scope.close(scope, Exit.void)));
 
-      assert.equal(initialized.userAgent, "mock-codex-app-server");
+      assert.equal(initialized.userAgent, expected);
+    }),
+  );
+
+  it.effect.each([
+    { command: "C:\\Program Files\\Codex\\codex.exe", requiresShell: false },
+    { command: "C:\\tools & fixtures\\CODEX.EXE", requiresShell: false },
+    { command: "codex.com", requiresShell: false },
+    { command: "C:\\tools & fixtures\\codex.cmd", requiresShell: true },
+    { command: "codex.BAT", requiresShell: true },
+    { command: "codex", requiresShell: true },
+  ])("selects the host command policy for $command", ({ command, requiresShell }) =>
+    Effect.gen(function* () {
+      const commands: Array<ChildProcess.Command> = [];
+      // Stop at the spawn boundary: these fixture paths must never execute.
+      const spawner = ChildProcessSpawner.make((observed) => {
+        commands.push(observed);
+        return Effect.fail(
+          PlatformError.systemError({
+            _tag: "NotFound",
+            module: "ChildProcess",
+            method: "spawn",
+            description: "Intentional command-policy fixture stop",
+          }),
+        );
+      });
+      const cwd = (yield* Path.Path).join(import.meta.dirname, "..");
+      const result = yield* CodexClient.layerCommand({
+        command,
+        args: literalCommandArgs,
+        cwd,
+      }).pipe(
+        Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner)),
+        Layer.build,
+        Effect.exit,
+      );
+      assert.equal(Exit.isFailure(result), true);
+      assert.equal(commands.length, 1);
+      const observed = commands[0];
+      if (observed?._tag !== "StandardCommand") {
+        return assert.fail("Expected one standard command");
+      }
+      assert.equal(observed.command, command);
+      assert.deepEqual(observed.args, literalCommandArgs);
+      assert.equal(observed.options.cwd, cwd);
+      assert.equal(observed.options.shell, process.platform === "win32" && requiresShell);
     }),
   );
 
