@@ -830,6 +830,24 @@ const ASTRA_CODEX_MODEL: ServerProviderModel = {
     supportsFastMode: true,
   }),
 };
+// Native Codex 0.159.1 advertises Low through Ultra with Low as its default:
+// https://github.com/openai/codex/blob/8e68a98ef03cdde76d2e6800791ebdf1b3b95b24/codex-rs/models-manager/models.json
+// These are Codex controls, not the separate API model's effort defaults or
+// context maximum. Live discovery remains authoritative (including Bedrock's
+// narrower controls); adding this fallback does not replace Cafe's Astra default.
+const SOL_61_CODEX_MODEL: ServerProviderModel = {
+  slug: "gpt-6.1-sol",
+  name: "GPT-6.1-Sol",
+  isCustom: false,
+  capabilities: {
+    ...makeStaticCodexReasoningCapabilities({
+      defaultEffort: "low",
+      supportedEfforts: CODEX_ULTRA_REASONING_EFFORTS,
+      supportsFastMode: true,
+    }),
+    inputModalities: ["text", "image"],
+  },
+};
 // Codex's published model guide (verified 2026-09-23) lists Sol's CLI efforts
 // through Ultra with Medium as default, and Luna through Max only:
 // https://learn.chatgpt.com/docs/models
@@ -858,6 +876,7 @@ const LUNA_CODEX_MODEL: ServerProviderModel = {
 };
 const KNOWN_CUSTOM_CODEX_MODELS: ReadonlyMap<string, ServerProviderModel> = new Map([
   [ASTRA_CODEX_MODEL.slug, { ...ASTRA_CODEX_MODEL, isCustom: true }],
+  [SOL_61_CODEX_MODEL.slug, { ...SOL_61_CODEX_MODEL, isCustom: true }],
   [SOL_CODEX_MODEL.slug, { ...SOL_CODEX_MODEL, isCustom: true }],
   [LUNA_CODEX_MODEL.slug, { ...LUNA_CODEX_MODEL, isCustom: true }],
 ]);
@@ -867,6 +886,7 @@ const KNOWN_CUSTOM_CODEX_MODELS: ReadonlyMap<string, ServerProviderModel> = new 
 // models before the full app-server diagnostic path has ever populated cache.
 const STATIC_CODEX_MODELS: ReadonlyArray<ServerProviderModel> = [
   ASTRA_CODEX_MODEL,
+  SOL_61_CODEX_MODEL,
   SOL_CODEX_MODEL,
   LUNA_CODEX_MODEL,
   {

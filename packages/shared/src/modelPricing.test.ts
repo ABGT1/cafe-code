@@ -64,6 +64,7 @@ describe("resolveModelRate", () => {
   });
 
   it.each([
+    ["gpt-6.1-sol", { input: 2, cachedInput: 0.1, cacheWrite: 2.5, output: 10 }],
     ["gpt-6-sol", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 10 }],
     ["gpt-6-luna", { input: 0.1, cachedInput: 0.01, cacheWrite: 0.125, output: 0.5 }],
     ["gpt-5.6-sol", { input: 4, cachedInput: 0.4, cacheWrite: 5, output: 20 }],
@@ -213,5 +214,25 @@ describe("rollUpCost", () => {
     expect(rollup.cacheSavings).toBeCloseTo(5.4 - 0.75, 6);
     expect(rollup.pricedTokens).toBe(1_100_000);
     expect(rollup.unpricedTokens).toBe(0);
+  });
+
+  it("keeps Sol 6.1 cache pricing distinct from Sol 6 without inferring request tiers", () => {
+    // Aggregate counters cannot establish a long-context request or Fast tier.
+    // Only the new model's published standard cache-read rate changes here.
+    const counts = {
+      inputTokens: 1_000_000,
+      cachedInputTokens: 600_000,
+      cacheWriteInputTokens: 300_000,
+      outputTokens: 100_000,
+    };
+    const current = rollUpCost([{ ...counts, model: "gpt-6.1-sol" }]);
+    const previous = rollUpCost([{ ...counts, model: "gpt-6-sol" }]);
+    // 100k fresh + 600k reads + 300k writes + 100k output.
+    expect(current.cost).toBeCloseTo(0.2 + 0.06 + 0.75 + 1, 6);
+    expect(current.cacheSavings).toBeCloseTo(1.14 - 0.15, 6);
+    expect(current.pricedTokens).toBe(1_100_000);
+    expect(current.unpricedTokens).toBe(0);
+    expect(previous.cost - current.cost).toBeCloseTo(0.06, 6);
+    expect(current.cacheSavings - previous.cacheSavings).toBeCloseTo(0.06, 6);
   });
 });
