@@ -15,6 +15,7 @@ import {
   formatCompactTokenCount,
   formatFullTokenCount,
   formatUsageModelLabel,
+  getUsageModelExplanation,
   formatUsageProviderLabel,
 } from "./usageStatsPresentation";
 
@@ -588,7 +589,9 @@ function UsageCostMetrics({
                       <td className="py-1.5 pr-3">
                         <span className="flex min-w-0 items-center gap-1.5">
                           {Icon ? <Icon className="size-3.5 shrink-0 opacity-70" /> : null}
-                          <span className="truncate">{formatUsageModelLabel(entry.model)}</span>
+                          <span className="truncate" title={getUsageModelExplanation(entry.model)}>
+                            {formatUsageModelLabel(entry.model)}
+                          </span>
                         </span>
                       </td>
                       <td

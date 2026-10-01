@@ -471,7 +471,7 @@ const rangeExpectations = {
     chats: "4",
     time: "3m 30s",
     attributed: "200,000 attributed",
-    activityDays: 3,
+    activityDays: 8,
     providers: [{ provider: "Codex", cost: "$3.94 USD", tokens: "2,200,000 tokens" }],
     models: [{ model: "gpt-5.6-codex", cost: "$3.94 USD", tokens: "2,200,000" }],
   },
@@ -489,7 +489,7 @@ const rangeExpectations = {
     chats: "11",
     time: "10m 30s",
     attributed: "500,000 attributed",
-    activityDays: 5,
+    activityDays: 8,
     providers: [
       { provider: "Claude", cost: "$15.88 USD", tokens: "3,300,000 tokens" },
       { provider: "Codex", cost: "$3.94 USD", tokens: "2,200,000 tokens" },
@@ -513,7 +513,7 @@ const rangeExpectations = {
     chats: "22",
     time: "21m 30s",
     attributed: "700,000 attributed",
-    activityDays: 7,
+    activityDays: 8,
     providers: [
       { provider: "Claude", cost: "$15.88 USD", tokens: "3,300,000 tokens" },
       { provider: "Codex", cost: "$6.74 USD", tokens: "3,300,000 tokens" },
@@ -692,7 +692,7 @@ describe("UsageStatsPanel", () => {
     }
   });
 
-  it("applies one calendar range to the complete Usage page and snaps every range change", async () => {
+  it("filters usage and cost figures immediately while retaining the full Activity calendar", async () => {
     const usage = createRangeUsageDetail();
     usageHarness.reset(usage, usage);
     mounted = await render(<UsageStatsPanel />);
@@ -709,6 +709,13 @@ describe("UsageStatsPanel", () => {
       ranges[0]!.compareDocumentPosition(requiredElement("[data-usage-cost-layout]")) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).not.toBe(0);
+    const heatmap = requiredElement('[role="img"][aria-label^="Daily generating time"]');
+    expect(heatmap.getAttribute("aria-label")).toContain("from 2026-04-22 through 2026-07-21");
+    const activityColors = usage.days.map(({ day }) => ({
+      day,
+      cell: requiredElement(`[data-activity-day="${day}"][data-activity-in-range="true"]`),
+      color: requiredElement(`[data-activity-day="${day}"]`).style.backgroundColor,
+    }));
 
     for (const label of ["7 days", "90 days", "All", "30 days"] as const) {
       await page.getByRole("button", { name: label, exact: true }).click();
@@ -719,7 +726,86 @@ describe("UsageStatsPanel", () => {
       expect(page.getByRole("button", { name: label, exact: true }).element().ariaPressed).toBe(
         "true",
       );
+      expect(heatmap.getAttribute("aria-label")).toContain("from 2026-04-22 through 2026-07-21");
+      // A range change affects accounting cards only. April 22 is outside the
+      // ninety-day window, and its retained color also pins the lifetime peak used
+      // by every Activity cell instead of recoloring each shorter selection.
+      for (const { day, cell, color } of activityColors) {
+        const current = requiredElement(
+          `[data-activity-day="${day}"][data-activity-in-range="true"]`,
+        );
+        expect(current).toBe(cell);
+        expect(current.style.backgroundColor).toBe(color);
+      }
     }
+    expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains accessible history older than 26 weeks and its scroll position across every range", async () => {
+    await page.viewport(640, 900);
+    const oldDay: UsageStatsDay = {
+      ...emptyTotals,
+      day: "2022-01-01",
+      generatingMs: 60_000,
+    };
+    const baseline = createRangeUsageDetail();
+    const usage: UsageStatsGetResult = {
+      ...baseline,
+      days: [oldDay, ...baseline.days],
+      totals: sumTotals([oldDay, baseline.totals]),
+    };
+    usageHarness.reset(usage, usage);
+    mounted = await render(<UsageStatsPanel />);
+    await vi.waitFor(() => expectCostRange("30 days"), { timeout: 5_000 });
+
+    const heatmap = requiredElement('[role="img"][aria-label^="Daily generating time"]');
+    expect(heatmap.getAttribute("aria-label")).toContain("from 2022-01-01 through 2026-07-21");
+    expect(heatmap.dataset.activityRangeDayCount).toBe("1663");
+    // A multi-year ledger uses the existing virtualized calendar. Its oldest
+    // stored day remains present at the beginning and can reveal its duration
+    // without inflating the rendered DOM to include every empty calendar day.
+    expect(heatmap.querySelectorAll('[data-activity-in-range="true"]').length).toBeLessThan(500);
+    const oldCell = requiredElement(
+      '[data-activity-day="2022-01-01"][data-activity-in-range="true"]',
+    );
+    expect(oldCell).toBeVisible();
+    const oldColor = oldCell.style.backgroundColor;
+    expect(oldColor).toContain("--color-primary");
+    expect((await hoverActivityCell("2022-01-01")).textContent).toContain("1m generating");
+
+    const scroller = requiredElement('[data-activity-heatmap-scroll="true"]');
+    scroller.scrollLeft = scroller.scrollWidth;
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector('[data-activity-day="2026-07-21"][data-activity-in-range="true"]'),
+      ).not.toBeNull(),
+    );
+    const scrollLeft = scroller.scrollLeft;
+    expect(scrollLeft).toBeGreaterThan(0);
+    const currentCell = requiredElement('[data-activity-day="2026-07-21"]');
+    const currentColor = currentCell.style.backgroundColor;
+
+    for (const label of ["7 days", "90 days", "All", "30 days"] as const) {
+      await page.getByRole("button", { name: label, exact: true }).click();
+      expectCostRange(label);
+      expect(heatmap.getAttribute("aria-label")).toContain("from 2022-01-01 through 2026-07-21");
+      expect(heatmap.dataset.activityRangeDayCount).toBe("1663");
+      expect(scroller.scrollLeft).toBe(scrollLeft);
+      expect(requiredElement('[data-activity-day="2026-07-21"]')).toBe(currentCell);
+      expect(currentCell.style.backgroundColor).toBe(currentColor);
+      expect((await hoverActivityCell("2026-07-21")).textContent).toContain("1m generating");
+    }
+
+    scroller.scrollLeft = 0;
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector('[data-activity-day="2022-01-01"][data-activity-in-range="true"]'),
+      ).not.toBeNull(),
+    );
+    expect(requiredElement('[data-activity-day="2022-01-01"]').style.backgroundColor).toBe(
+      oldColor,
+    );
+    expect((await hoverActivityCell("2022-01-01")).textContent).toContain("1m generating");
     expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
   });
 
@@ -779,7 +865,7 @@ describe("UsageStatsPanel", () => {
       requiredElement('[aria-label="Token usage by provider and model"]').textContent,
     ).toContain("550,000");
     expect(document.body.textContent).not.toContain("grok-legacy-model");
-    expect(activeActivityCellCount()).toBe(5);
+    expect(activeActivityCellCount()).toBe(8);
 
     await page.getByRole("button", { name: "All", exact: true }).click();
     expectPanelRange("All");
@@ -857,7 +943,7 @@ describe("UsageStatsPanel", () => {
     );
   });
 
-  it("projects from the latest same-day observation and resets its time floor when the range changes", async () => {
+  it("resets the selected total's floor while retaining today's Activity floor across ranges", async () => {
     // Only Date is controlled: the component's real 250ms projection timer,
     // detail resource, React updates, and browser layout still execute normally.
     const baseMs = Date.parse("2026-07-21T12:00:00Z");
@@ -911,6 +997,15 @@ describe("UsageStatsPanel", () => {
     expect(overviewValue("Tokens generated")).toBe("250,000");
     expectCostRange("7 days");
     expect(document.body.textContent).not.toContain("sessions generating");
+    expect((await hoverActivityCell("2026-07-21")).textContent).toContain("1m 12s generating");
+    for (const label of ["90 days", "All", "30 days", "7 days"] as const) {
+      await page.getByRole("button", { name: label, exact: true }).click();
+      expectCostRange(label);
+      // The latest settled detail is below the earlier live projection. Only
+      // the summary's accounting scope resets; Activity must keep today's
+      // already displayed duration even when a selector is clicked repeatedly.
+      expect((await hoverActivityCell("2026-07-21")).textContent).toContain("1m 12s generating");
+    }
   });
 
   it("freezes the old server day at midnight until a newer detailed response replaces its calendar", async () => {
@@ -1000,11 +1095,31 @@ describe("UsageStatsPanel", () => {
       requiredElement('[role="img"][aria-label^="Daily generating time"]').getAttribute(
         "aria-label",
       ),
-    ).toContain("from 2026-07-16 through 2026-07-22");
-    expect(
-      document.querySelector('[data-activity-day="2026-07-15"][data-activity-in-range="true"]'),
-    ).toBeNull();
+    ).toContain("from 2026-04-22 through 2026-07-22");
+    expect(activeActivityCellCount()).toBe(9);
+    expect((await hoverActivityCell("2026-07-15")).textContent).toContain("2m generating");
+    expect((await hoverActivityCell("2026-04-22")).textContent).toContain("7m generating");
     expect((await hoverActivityCell("2026-07-22")).textContent).toContain("2s generating");
+    const refreshedActivity = freshUsage.days.map(({ day }) => ({
+      day,
+      color: requiredElement(`[data-activity-day="${day}"]`).style.backgroundColor,
+    }));
+    for (const label of ["30 days", "90 days", "All", "7 days"] as const) {
+      await page.getByRole("button", { name: label, exact: true }).click();
+      expect(
+        requiredElement('[role="img"][aria-label^="Daily generating time"]').getAttribute(
+          "aria-label",
+        ),
+      ).toContain("from 2026-04-22 through 2026-07-22");
+      expect(activeActivityCellCount()).toBe(9);
+      for (const { day, color } of refreshedActivity) {
+        expect(
+          requiredElement(`[data-activity-day="${day}"][data-activity-in-range="true"]`).style
+            .backgroundColor,
+        ).toBe(color);
+      }
+      expect((await hoverActivityCell("2026-07-22")).textContent).toContain("2s generating");
+    }
   });
 
   it("renders stored provider and model token attribution with unattributed usage separated", async () => {
@@ -1030,6 +1145,88 @@ describe("UsageStatsPanel", () => {
     expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
     expect(usageHarness.subscribeConnectionOpened).toHaveBeenCalledTimes(1);
     expect(usageHarness.subscribeUsageStats).toHaveBeenCalledTimes(1);
+  });
+
+  it("explains an omitted effective model while retaining its exact counted and unpriced usage", async () => {
+    // This synthetic observation has a known provider but no effective model.
+    // Cached input is a subset of input, so the unpriced processed volume is
+    // 20,511 input + 16 output, never input plus cached input a second time.
+    const today: UsageStatsDay = {
+      ...emptyTotals,
+      day: "2026-07-21",
+      inputTokens: 20_511,
+      cachedInputTokens: 9_984,
+      outputTokens: 16,
+      userMessages: 1,
+    };
+    const unknownModel: UsageStatsTokenBreakdownEntry = {
+      provider: ProviderDriverKind.make("codex"),
+      model: "unknown",
+      inputTokens: 20_511,
+      cachedInputTokens: 9_984,
+      cacheWriteInputTokens: 0,
+      outputTokens: 16,
+      reasoningOutputTokens: 0,
+    };
+    const usage: UsageStatsGetResult = {
+      ...snapshot,
+      totals: today,
+      today,
+      days: [today],
+      tokenBreakdown: [unknownModel],
+      tokenBreakdownDays: [{ ...unknownModel, day: today.day }],
+    };
+    usageHarness.reset(usage, usage);
+    mounted = await render(<UsageStatsPanel />);
+    await vi.waitFor(
+      () => {
+        expect(overviewValue("Tokens generated")).toBe("16");
+        expect(displayedRawCount("processed")).toBe(20_527);
+        expect(displayedRawCount("cached")).toBe(9_984);
+        expect(displayedRawCount("uncached")).toBe(10_527);
+        expect(displayedRawCount("output")).toBe(16);
+      },
+      { timeout: 5_000 },
+    );
+
+    const costLabel = requiredElement("[data-usage-cost-breakdown] tbody span[title]");
+    const tokenLabel = requiredElement(
+      '[aria-label="Token usage by provider and model"] span[title]',
+    );
+    const explanation =
+      "The provider reported token usage without identifying the effective model. Tokens remain counted; cost is unpriced unless you set a custom rate.";
+    expect(costLabel.textContent).toBe("Model not reported");
+    expect(tokenLabel.textContent).toBe("Model not reported");
+    expect(costLabel.title).toBe(explanation);
+    expect(tokenLabel.title).toBe(explanation);
+    // A missing model must not turn a known provider into unattributed output
+    // or silently price the observation as the user's requested model.
+    expect(page.getByText("16 attributed", { exact: true }).element()).toBeVisible();
+    expect(tokenLabel.parentElement!.lastElementChild!.lastElementChild!.textContent).toBe("16");
+    expect(document.body.textContent).not.toContain("Unattributed usage");
+
+    for (const label of ["7 days", "90 days", "All", "30 days"] as const) {
+      await page.getByRole("button", { name: label, exact: true }).click();
+      expect(overviewValue("Tokens generated")).toBe("16");
+      expect(displayedRawCount("processed")).toBe(20_527);
+      expect(displayedRawCount("output")).toBe(16);
+      expect(requiredElement("[data-usage-cost-hero-value]").textContent).toBe("$0.00 USD*");
+      expect(costQualityValue("Priced")).toBe("0.0%");
+      expect(costQualityValue("Unpriced")).toBe("100.0%");
+      expect(providerCostRows()).toEqual([
+        { provider: "Codex", cost: "unpriced", tokens: "20,527 tokens" },
+      ]);
+      expect(modelCostRows()).toEqual([
+        { model: "Model not reported", cost: "unpriced", tokens: "20,527" },
+      ]);
+      expect(requiredElement("[data-usage-cost-breakdown] tbody span[title]").title).toBe(
+        explanation,
+      );
+      expect(
+        requiredElement('[aria-label="Token usage by provider and model"] span[title]').title,
+      ).toBe(explanation);
+    }
+    expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
   });
 
   it("renders a quiet empty state before attributed tokens exist", async () => {

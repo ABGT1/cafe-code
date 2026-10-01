@@ -6,6 +6,7 @@ import {
   formatCompactTokenCount,
   formatFullTokenCount,
   formatUsageModelLabel,
+  getUsageModelExplanation,
   formatUsagePercentage,
   formatUsageProviderLabel,
 } from "./usageStatsPresentation";
@@ -93,8 +94,12 @@ describe("usageStatsPresentation", () => {
     expect(formatUsageProviderLabel(ProviderDriverKind.make("custom_driver"))).toBe(
       "Custom Driver",
     );
-    expect(formatUsageModelLabel("unknown")).toBe("Unknown model");
+    expect(formatUsageModelLabel("unknown")).toBe("Model not reported");
     expect(formatUsageModelLabel("gpt-5.6-codex")).toBe("gpt-5.6-codex");
+    expect(getUsageModelExplanation("unknown")).toBe(
+      "The provider reported token usage without identifying the effective model. Tokens remain counted; cost is unpriced unless you set a custom rate.",
+    );
+    expect(getUsageModelExplanation("gpt-5.6-codex")).toBeUndefined();
     expect(formatUsagePercentage(1, 2_000)).toBe("<0.1%");
     expect(formatUsagePercentage(5, 100)).toBe("5.0%");
     expect(formatUsagePercentage(1, 0)).toBe("0%");

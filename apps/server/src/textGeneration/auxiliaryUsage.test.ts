@@ -135,6 +135,41 @@ describe("auxiliary terminal usage", () => {
     expect(reader.finish()?.models[0]?.inputTokens).toBe(60);
   });
 
+  it("keeps aggregate Codex usage unpriced despite model hints or generic reroute text", () => {
+    // Exec's aggregate terminal counters are not a model-scoped receipt. The
+    // requested name, extra JSON fields and human-readable error item cannot
+    // prove which model served every token, even for a tiny metadata request.
+    const terminal = JSON.stringify({
+      type: "turn.completed",
+      model: "gpt-6.1-sol",
+      usage: { input_tokens: 20_511, cached_input_tokens: 9_984, output_tokens: 16 },
+    });
+    const result = readCodex(
+      [
+        JSON.stringify({ type: "turn.started", model: "gpt-6-astra" }),
+        JSON.stringify({
+          type: "item.completed",
+          item: {
+            type: "error",
+            message: "model rerouted: gpt-6-astra -> gpt-6.1-sol (capacity)",
+          },
+        }),
+        terminal,
+        terminal,
+      ].join("\n"),
+    );
+    expect(result?.models).toEqual([
+      {
+        model: "unknown",
+        inputTokens: 20_511,
+        cachedInputTokens: 9_984,
+        cacheWriteInputTokens: 0,
+        outputTokens: 16,
+        reasoningOutputTokens: 0,
+      },
+    ]);
+  });
+
   it.each([
     { input_tokens: -1 },
     { input_tokens: 1.5 },

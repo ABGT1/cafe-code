@@ -144,7 +144,19 @@ export function formatUsageProviderLabel(provider: ProviderDriverKind): string {
 }
 
 export function formatUsageModelLabel(model: string): string {
-  return model === "unknown" ? "Unknown model" : model;
+  return model === "unknown" ? "Model not reported" : model;
+}
+
+/**
+ * A known provider with an absent effective model is different from missing
+ * provider attribution. Helpers and older observations can legitimately lack
+ * that field; never present the requested model as the one that served them.
+ * Keep the explanation shared by output breakdown and estimated-cost rows.
+ */
+export function getUsageModelExplanation(model: string): string | undefined {
+  return model === "unknown"
+    ? "The provider reported token usage without identifying the effective model. Tokens remain counted; cost is unpriced unless you set a custom rate."
+    : undefined;
 }
 
 export function formatUsagePercentage(part: number, whole: number): string {

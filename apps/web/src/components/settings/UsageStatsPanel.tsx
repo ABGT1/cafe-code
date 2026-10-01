@@ -15,6 +15,7 @@ import { UsageCostSection } from "./UsageCostSection";
 import {
   buildUsageTokenBreakdownView,
   formatUsageModelLabel,
+  getUsageModelExplanation,
   formatUsagePercentage,
   formatUsageProviderLabel,
 } from "./usageStatsPresentation";
@@ -56,6 +57,7 @@ function useLiveTotals(
 ) {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const displayedTimeFloor = useRef({ scope: "", value: 0 });
+  const displayedTodayFloor = useRef({ day: "", value: 0 });
 
   useEffect(() => {
     const id = setInterval(() => setNowMs(Date.now()), 250);
@@ -76,6 +78,12 @@ function useLiveTotals(
     // (or the new calendar day) from displaying its smaller true total.
     displayedTimeFloor.current = { scope, value: 0 };
   }
+  // Activity is lifetime history, not part of the reporting-period selector.
+  // Its current-day projection must therefore keep an independent floor when
+  // the user switches ranges, while still resetting at the server's midnight.
+  if (displayedTodayFloor.current.day !== snapshot.today.day) {
+    displayedTodayFloor.current = { day: snapshot.today.day, value: 0 };
+  }
   // Apply observed same-day generation before projecting from the live event's
   // own timestamp. Projecting a newly increased session count all the way from
   // an older detail read would retroactively charge those sessions for time
@@ -89,6 +97,11 @@ function useLiveTotals(
     sameDay && activity.collectionEnabled && activity.activeSessionCount > 0
       ? Math.max(0, nowMs - activity.asOfMs) * activity.activeSessionCount
       : 0;
+  const todayGeneratingMs = Math.max(
+    displayedTodayFloor.current.value,
+    snapshot.today.generatingMs + observedMs + extrapolatedMs,
+  );
+  displayedTodayFloor.current.value = todayGeneratingMs;
   const generatingMs = Math.max(
     displayedTimeFloor.current.value,
     snapshot.totals.generatingMs + observedMs + extrapolatedMs,
@@ -98,8 +111,7 @@ function useLiveTotals(
     outputTokens: snapshot.totals.outputTokens,
     userMessages: snapshot.totals.userMessages,
     generatingMs,
-    todayGeneratingMs:
-      snapshot.today.generatingMs + Math.max(0, generatingMs - snapshot.totals.generatingMs),
+    todayGeneratingMs,
     activeSessionCount: activity.activeSessionCount,
     collectionEnabled: activity.collectionEnabled,
   };
@@ -194,7 +206,10 @@ function TokenBreakdownSection({
                     >
                       <span
                         className="min-w-0 truncate font-mono text-[11px] text-muted-foreground"
-                        title={formatUsageModelLabel(modelUsage.model)}
+                        title={
+                          getUsageModelExplanation(modelUsage.model) ??
+                          formatUsageModelLabel(modelUsage.model)
+                        }
                       >
                         {formatUsageModelLabel(modelUsage.model)}
                       </span>
@@ -254,9 +269,9 @@ export function UsageStatsPanel() {
     () => (initial === null ? null : selectUsageRange(initial, range)),
     [initial, range],
   );
-  const bounds = useMemo(
-    () => (initial === null ? undefined : getUsageRangeBounds(initial, range)),
-    [initial, range],
+  const activityBounds = useMemo(
+    () => (initial === null ? undefined : getUsageRangeBounds(initial, "all")),
+    [initial],
   );
   const [snapshot, setSnapshot] = useState<UsageStatsSnapshot | null>(null);
   const loadError = detail.phase === "error" && initial === null;
@@ -342,13 +357,13 @@ export function UsageStatsPanel() {
 
       <SettingsSection title="Activity">
         <div className="px-4 py-4 sm:px-5">
-          {selected ? (
+          {initial ? (
             <ActivityHeatmap
-              days={selected.days}
-              bounds={bounds}
+              days={initial.days}
+              bounds={activityBounds}
               today={
                 totals
-                  ? { ...selected.today, generatingMs: Math.round(totals.todayGeneratingMs) }
+                  ? { ...initial.today, generatingMs: Math.round(totals.todayGeneratingMs) }
                   : undefined
               }
             />
