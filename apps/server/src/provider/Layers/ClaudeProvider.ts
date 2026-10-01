@@ -124,6 +124,11 @@ function decodeClaudeModelCatalog(raw: unknown) {
 // max effort with Medium default, and specify native 1M context plus Fast.
 // https://code.claude.com/docs/en/model-config
 // Live initialization metadata still takes precedence over these fallbacks.
+// Sonnet 5.5 requires CLI 2.1.284 and defaults to Medium in Claude Code
+// (the direct API defaults to High). It supports all five concrete efforts,
+// with native 1M context and no Fast mode or selectable 200K/[1m] variant.
+// Leave its context selector absent, as for Sonnet 5: the CLI owns native
+// context/compaction resolution and its live usage supplies the actual window.
 const DECODED_CLAUDE_MODEL_CATALOG = decodeClaudeModelCatalog(claudeModelCatalog);
 const VERSIONED_BUILT_IN_MODELS = DECODED_CLAUDE_MODEL_CATALOG.models;
 const BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = VERSIONED_BUILT_IN_MODELS.map(

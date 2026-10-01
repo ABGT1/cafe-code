@@ -5,74 +5,74 @@ __metadata:
   version: 10
   cacheKey: 10c0
 
-"@anthropic-ai/claude-agent-sdk-darwin-arm64@npm:0.3.283":
-  version: 0.3.283
-  resolution: "@anthropic-ai/claude-agent-sdk-darwin-arm64@npm:0.3.283"
+"@anthropic-ai/claude-agent-sdk-darwin-arm64@npm:0.3.286":
+  version: 0.3.286
+  resolution: "@anthropic-ai/claude-agent-sdk-darwin-arm64@npm:0.3.286"
   conditions: os=darwin & cpu=arm64
   languageName: node
   linkType: hard
 
-"@anthropic-ai/claude-agent-sdk-darwin-x64@npm:0.3.283":
-  version: 0.3.283
-  resolution: "@anthropic-ai/claude-agent-sdk-darwin-x64@npm:0.3.283"
+"@anthropic-ai/claude-agent-sdk-darwin-x64@npm:0.3.286":
+  version: 0.3.286
+  resolution: "@anthropic-ai/claude-agent-sdk-darwin-x64@npm:0.3.286"
   conditions: os=darwin & cpu=x64
   languageName: node
   linkType: hard
 
-"@anthropic-ai/claude-agent-sdk-linux-arm64-musl@npm:0.3.283":
-  version: 0.3.283
-  resolution: "@anthropic-ai/claude-agent-sdk-linux-arm64-musl@npm:0.3.283"
+"@anthropic-ai/claude-agent-sdk-linux-arm64-musl@npm:0.3.286":
+  version: 0.3.286
+  resolution: "@anthropic-ai/claude-agent-sdk-linux-arm64-musl@npm:0.3.286"
   conditions: os=linux & cpu=arm64 & libc=musl
   languageName: node
   linkType: hard
 
-"@anthropic-ai/claude-agent-sdk-linux-arm64@npm:0.3.283":
-  version: 0.3.283
-  resolution: "@anthropic-ai/claude-agent-sdk-linux-arm64@npm:0.3.283"
+"@anthropic-ai/claude-agent-sdk-linux-arm64@npm:0.3.286":
+  version: 0.3.286
+  resolution: "@anthropic-ai/claude-agent-sdk-linux-arm64@npm:0.3.286"
   conditions: os=linux & cpu=arm64 & libc=glibc
   languageName: node
   linkType: hard
 
-"@anthropic-ai/claude-agent-sdk-linux-x64-musl@npm:0.3.283":
-  version: 0.3.283
-  resolution: "@anthropic-ai/claude-agent-sdk-linux-x64-musl@npm:0.3.283"
+"@anthropic-ai/claude-agent-sdk-linux-x64-musl@npm:0.3.286":
+  version: 0.3.286
+  resolution: "@anthropic-ai/claude-agent-sdk-linux-x64-musl@npm:0.3.286"
   conditions: os=linux & cpu=x64 & libc=musl
   languageName: node
   linkType: hard
 
-"@anthropic-ai/claude-agent-sdk-linux-x64@npm:0.3.283":
-  version: 0.3.283
-  resolution: "@anthropic-ai/claude-agent-sdk-linux-x64@npm:0.3.283"
+"@anthropic-ai/claude-agent-sdk-linux-x64@npm:0.3.286":
+  version: 0.3.286
+  resolution: "@anthropic-ai/claude-agent-sdk-linux-x64@npm:0.3.286"
   conditions: os=linux & cpu=x64 & libc=glibc
   languageName: node
   linkType: hard
 
-"@anthropic-ai/claude-agent-sdk-win32-arm64@npm:0.3.283":
-  version: 0.3.283
-  resolution: "@anthropic-ai/claude-agent-sdk-win32-arm64@npm:0.3.283"
+"@anthropic-ai/claude-agent-sdk-win32-arm64@npm:0.3.286":
+  version: 0.3.286
+  resolution: "@anthropic-ai/claude-agent-sdk-win32-arm64@npm:0.3.286"
   conditions: os=win32 & cpu=arm64
   languageName: node
   linkType: hard
 
-"@anthropic-ai/claude-agent-sdk-win32-x64@npm:0.3.283":
-  version: 0.3.283
-  resolution: "@anthropic-ai/claude-agent-sdk-win32-x64@npm:0.3.283"
+"@anthropic-ai/claude-agent-sdk-win32-x64@npm:0.3.286":
+  version: 0.3.286
+  resolution: "@anthropic-ai/claude-agent-sdk-win32-x64@npm:0.3.286"
   conditions: os=win32 & cpu=x64
   languageName: node
   linkType: hard
 
-"@anthropic-ai/claude-agent-sdk@npm:0.3.283":
-  version: 0.3.283
-  resolution: "@anthropic-ai/claude-agent-sdk@npm:0.3.283"
+"@anthropic-ai/claude-agent-sdk@npm:0.3.286":
+  version: 0.3.286
+  resolution: "@anthropic-ai/claude-agent-sdk@npm:0.3.286"
   dependencies:
-    "@anthropic-ai/claude-agent-sdk-darwin-arm64": "npm:0.3.283"
-    "@anthropic-ai/claude-agent-sdk-darwin-x64": "npm:0.3.283"
-    "@anthropic-ai/claude-agent-sdk-linux-arm64": "npm:0.3.283"
-    "@anthropic-ai/claude-agent-sdk-linux-arm64-musl": "npm:0.3.283"
-    "@anthropic-ai/claude-agent-sdk-linux-x64": "npm:0.3.283"
-    "@anthropic-ai/claude-agent-sdk-linux-x64-musl": "npm:0.3.283"
-    "@anthropic-ai/claude-agent-sdk-win32-arm64": "npm:0.3.283"
-    "@anthropic-ai/claude-agent-sdk-win32-x64": "npm:0.3.283"
+    "@anthropic-ai/claude-agent-sdk-darwin-arm64": "npm:0.3.286"
+    "@anthropic-ai/claude-agent-sdk-darwin-x64": "npm:0.3.286"
+    "@anthropic-ai/claude-agent-sdk-linux-arm64": "npm:0.3.286"
+    "@anthropic-ai/claude-agent-sdk-linux-arm64-musl": "npm:0.3.286"
+    "@anthropic-ai/claude-agent-sdk-linux-x64": "npm:0.3.286"
+    "@anthropic-ai/claude-agent-sdk-linux-x64-musl": "npm:0.3.286"
+    "@anthropic-ai/claude-agent-sdk-win32-arm64": "npm:0.3.286"
+    "@anthropic-ai/claude-agent-sdk-win32-x64": "npm:0.3.286"
   peerDependencies:
     "@anthropic-ai/sdk": ">=0.93.0"
     "@modelcontextprotocol/sdk": ^1.29.0
@@ -94,7 +94,7 @@ __metadata:
       optional: true
     "@anthropic-ai/claude-agent-sdk-win32-x64":
       optional: true
-  checksum: 10c0/0802bb1a84a06419a2047982a635591126428d9766724f8ee02b6aa1c5667a76c3eb3660ba5a56c94d06e9701b2cc5cbb0b760bb16ca532673e090367bb41fa4
+  checksum: 10c0/036b840e67322f20468fc09439b33b8e89cfbff4abfe13d65097e999ba35de95bff1582755b9d043d377f6348e4c7ec52e86a84502ec531aa1de08aa84fdb9cc
   languageName: node
   linkType: hard
 
@@ -420,7 +420,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@cafeai/cafe-code@workspace:apps/server"
   dependencies:
-    "@anthropic-ai/claude-agent-sdk": "npm:0.3.283"
+    "@anthropic-ai/claude-agent-sdk": "npm:0.3.286"
     "@anthropic-ai/sdk": "npm:^0.98.0"
     "@cafecode/contracts": "workspace:*"
     "@cafecode/shared": "workspace:*"
@@ -486,7 +486,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@cafecode/desktop-runtime@workspace:packaging/desktop-runtime"
   dependencies:
-    "@anthropic-ai/claude-agent-sdk": "npm:0.3.283"
+    "@anthropic-ai/claude-agent-sdk": "npm:0.3.286"
     "@anthropic-ai/sdk": "npm:^0.98.0"
     "@effect/platform-node": "catalog:"
     "@effect/platform-node-shared": "catalog:"
@@ -572,7 +572,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@cafecode/scripts@workspace:scripts"
   dependencies:
-    "@anthropic-ai/claude-agent-sdk": "npm:0.3.283"
+    "@anthropic-ai/claude-agent-sdk": "npm:0.3.286"
     "@anthropic-ai/sdk": "npm:^0.98.0"
     "@cafecode/contracts": "workspace:*"
     "@cafecode/shared": "workspace:*"

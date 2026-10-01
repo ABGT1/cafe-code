@@ -125,6 +125,12 @@ describe("normalizeModelSlug", () => {
     expect(normalizeModelSlug("opus-4.7", claude)).toBe("claude-opus-4-7");
     expect(normalizeModelSlug("sonnet", claude)).toBe("claude-sonnet-5");
     expect(normalizeModelSlug("sonnet[1m]", claude)).toBe("claude-sonnet-5");
+    expect(normalizeModelSlug("sonnet-5.5", claude)).toBe("claude-sonnet-5-5");
+    expect(normalizeModelSlug("sonnet55", claude)).toBe("claude-sonnet-5-5");
+    expect(normalizeModelSlug("claude-sonnet-5-5[1m]", claude)).toBe("claude-sonnet-5-5");
+    expect(normalizeModelSlug("sonnet-5", claude)).toBe("claude-sonnet-5");
+    expect(normalizeModelSlug("sonnet5", claude)).toBe("claude-sonnet-5");
+    expect(normalizeModelSlug("claude-sonnet-5", claude)).toBe("claude-sonnet-5");
   });
 
   it("returns null for empty or missing values", () => {
@@ -136,6 +142,14 @@ describe("normalizeModelSlug", () => {
 });
 
 describe("resolveModelSlugForProvider", () => {
+  it("preserves the Cafe Sonnet 5 default and legacy aliases alongside explicit Sonnet 5.5", () => {
+    const claude = ProviderDriverKind.make("claudeAgent");
+    expect(resolveModelSlugForProvider(claude, undefined)).toBe("claude-sonnet-5");
+    expect(resolveModelSlugForProvider(claude, "claude-sonnet-5")).toBe("claude-sonnet-5");
+    expect(resolveModelSlugForProvider(claude, "sonnet")).toBe("claude-sonnet-5");
+    expect(resolveModelSlugForProvider(claude, "sonnet[1m]")).toBe("claude-sonnet-5");
+    expect(resolveModelSlugForProvider(claude, "sonnet-5.5")).toBe("claude-sonnet-5-5");
+  });
   it("defaults new Codex selections to Astra while preserving explicit Sol selections", () => {
     const codex = ProviderDriverKind.make("codex");
     expect(resolveModelSlugForProvider(codex, undefined)).toBe("gpt-6-astra");
@@ -164,6 +178,7 @@ describe("resolveSelectableModel", () => {
     const options = [
       { slug: "gpt-5.3-codex", name: "GPT-5.3 Codex" },
       { slug: "claude-sonnet-5", name: "Claude Sonnet 5" },
+      { slug: "claude-sonnet-5-5", name: "Claude Sonnet 5.5" },
       { slug: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
     ];
     expect(resolveSelectableModel(ProviderDriverKind.make("codex"), "gpt-5.3-codex", options)).toBe(
@@ -175,6 +190,9 @@ describe("resolveSelectableModel", () => {
     expect(resolveSelectableModel(ProviderDriverKind.make("claudeAgent"), "sonnet", options)).toBe(
       "claude-sonnet-5",
     );
+    expect(
+      resolveSelectableModel(ProviderDriverKind.make("claudeAgent"), "sonnet-5.5", options),
+    ).toBe("claude-sonnet-5-5");
   });
 });
 

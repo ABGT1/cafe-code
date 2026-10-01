@@ -347,7 +347,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           assert.strictEqual(status.version, "1.0.0");
           assert.strictEqual(status.auth.status, "authenticated");
           assert.strictEqual(status.auth.type, "chatgpt");
-          assert.strictEqual(status.auth.label, "ChatGPT Pro (More) Subscription");
+          assert.strictEqual(status.auth.label, "ChatGPT Pro 200 Subscription");
           assert.strictEqual(status.auth.email, "test@example.com");
           assert.deepStrictEqual(status.models, [
             {
@@ -387,7 +387,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           );
 
           assert.strictEqual(status.auth.status, "authenticated");
-          assert.strictEqual(status.auth.label, "ChatGPT Pro (Max) Subscription");
+          assert.strictEqual(status.auth.label, "ChatGPT Pro 500 Subscription");
         }),
       );
 
@@ -1532,7 +1532,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             assert.deepStrictEqual(yield* registry.refreshInstanceAccountUsage(codexInstanceId), [
               {
                 ...usageRefreshedProvider,
-                auth: { ...cachedProvider.auth, label: "ChatGPT Pro Subscription" },
+                auth: { ...cachedProvider.auth, label: "ChatGPT Pro 100 Subscription" },
               },
             ]);
             assert.deepStrictEqual(yield* registry.refreshInstanceModels!(codexInstanceId), [
@@ -1555,14 +1555,14 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               "ChatGPT Subscription",
             );
             for (const update of [
-              { limitId: "codex", planType: "pro", expected: "ChatGPT Pro (More) Subscription" },
-              { limitId: "codex", planType: "promax", expected: "ChatGPT Pro (Max) Subscription" },
-              { limitId: "codex", planType: undefined, expected: "ChatGPT Pro (Max) Subscription" },
-              { limitId: "codex", planType: null, expected: "ChatGPT Pro (Max) Subscription" },
+              { limitId: "codex", planType: "pro", expected: "ChatGPT Pro 200 Subscription" },
+              { limitId: "codex", planType: "promax", expected: "ChatGPT Pro 500 Subscription" },
+              { limitId: "codex", planType: undefined, expected: "ChatGPT Pro 500 Subscription" },
+              { limitId: "codex", planType: null, expected: "ChatGPT Pro 500 Subscription" },
               {
                 limitId: "codex_bengalfox",
                 planType: "plus",
-                expected: "ChatGPT Pro (Max) Subscription",
+                expected: "ChatGPT Pro 500 Subscription",
               },
               { limitId: "codex", planType: "unknown", expected: "ChatGPT Subscription" },
               { limitId: "codex", planType: "future-plan", expected: "ChatGPT Subscription" },
@@ -2404,9 +2404,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
 
           for (const testCase of [
             { plan: "plus", label: "ChatGPT Plus Subscription" },
-            { plan: "prolite", label: "ChatGPT Pro Subscription" },
-            { plan: "pro", label: "ChatGPT Pro (More) Subscription" },
-            { plan: "promax", label: "ChatGPT Pro (Max) Subscription" },
+            { plan: "prolite", label: "ChatGPT Pro 100 Subscription" },
+            { plan: "pro", label: "ChatGPT Pro 200 Subscription" },
+            { plan: "promax", label: "ChatGPT Pro 500 Subscription" },
             { plan: undefined, label: "ChatGPT Subscription" },
             { plan: null, label: "ChatGPT Subscription" },
             { plan: "unknown", label: "ChatGPT Subscription" },
@@ -2631,7 +2631,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             unlimited: false,
             balance: "9.99",
           });
-          assert.strictEqual(status.auth.label, "ChatGPT Pro (More) Subscription");
+          assert.strictEqual(status.auth.label, "ChatGPT Pro 200 Subscription");
           assert.strictEqual(status.accountRateLimits?.rateLimits.primary?.windowDurationMins, 300);
           assert.strictEqual(status.accountRateLimits?.rateLimits.secondary?.usedPercent, 75);
           assert.strictEqual(status.accountRateLimits?.rateLimits.spendControlReached, true);
@@ -3126,6 +3126,35 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               "claude-fable-5",
               "claude-sonnet-5",
             ],
+            upgrade:
+              "Claude Code v2.1.280 is too old for Claude Sonnet 5.5. Upgrade to v2.1.284 or newer to access it.",
+          },
+          {
+            version: "2.1.283",
+            slugs: [
+              "claude-opus-5-5",
+              "claude-opus-5",
+              "claude-fable-5-1",
+              "claude-opus-4-7",
+              "claude-opus-4-8",
+              "claude-fable-5",
+              "claude-sonnet-5",
+            ],
+            upgrade:
+              "Claude Code v2.1.283 is too old for Claude Sonnet 5.5. Upgrade to v2.1.284 or newer to access it.",
+          },
+          {
+            version: "2.1.284",
+            slugs: [
+              "claude-opus-5-5",
+              "claude-opus-5",
+              "claude-fable-5-1",
+              "claude-opus-4-7",
+              "claude-opus-4-8",
+              "claude-fable-5",
+              "claude-sonnet-5-5",
+              "claude-sonnet-5",
+            ],
           },
         ];
         const gatedSlugs = [
@@ -3135,6 +3164,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           "claude-opus-4-7",
           "claude-opus-4-8",
           "claude-fable-5",
+          "claude-sonnet-5-5",
           "claude-sonnet-5",
         ];
 
@@ -3298,7 +3328,34 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             },
           ],
         );
-        assert.isUndefined(formatClaudeModelUpgradeMessage("2.1.280"));
+        const sonnet55 = getBuiltInClaudeModelsForVersion("2.1.284").find(
+          (model) => model.slug === "claude-sonnet-5-5",
+        );
+        const sonnet55Descriptors = sonnet55?.capabilities?.optionDescriptors ?? [];
+        const sonnet55Effort = sonnet55Descriptors.find((descriptor) => descriptor.id === "effort");
+        assert.deepStrictEqual(
+          sonnet55Effort?.type === "select"
+            ? {
+                efforts: sonnet55Effort.options.map((option) => option.id),
+                currentValue: sonnet55Effort.currentValue,
+                default: sonnet55Effort.options.find((option) => option.isDefault)?.id,
+              }
+            : undefined,
+          {
+            efforts: ["low", "medium", "high", "xhigh", "max"],
+            currentValue: "medium",
+            default: "medium",
+          },
+        );
+        // Sonnet's 1M window is native: offering a 200K or [1m] variant would
+        // promise a request policy the model does not provide. Fast is Opus-only.
+        assert.equal(
+          sonnet55Descriptors.some(
+            (descriptor) => descriptor.id === "contextWindow" || descriptor.id === "fastMode",
+          ),
+          false,
+        );
+        assert.isUndefined(formatClaudeModelUpgradeMessage("2.1.284"));
 
         for (const model of getBuiltInClaudeModelsForVersion("2.1.219")) {
           const descriptors = model.capabilities?.optionDescriptors ?? [];

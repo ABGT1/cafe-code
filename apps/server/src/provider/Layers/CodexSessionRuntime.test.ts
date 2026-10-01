@@ -36,8 +36,10 @@ import {
   acknowledgeCodexPendingSteerProcessing,
   acknowledgeCodexSteerLifecycleBoundary,
   acknowledgeCodexTurnStartLifecycleBoundary,
+  acknowledgeCodexReasoningEffortRequest,
   admitCodexTurnStartLifecycleBoundary,
   admitCodexPendingSteerProcessing,
+  admitCodexReasoningEffortRequest,
   buildCodexAppServerArgs,
   buildCodexActiveContextCompactionSteerError,
   buildCodexPendingSteerCapacityError,
@@ -70,6 +72,8 @@ import {
   isCodexUserMessageItemType,
   isTerminalCodexChildThreadReadError,
   openCodexThread,
+  observeCodexThreadOpenReasoningEffort,
+  observeCodexThreadSettingsReasoningEffort,
   prunePendingSteerProcessing,
   publishCodexTurnCompletionAfterLifecycleBoundary,
   readCodexBoundedSummaryThreadWithClient,
@@ -98,6 +102,7 @@ import {
   type CodexBoundedThreadSnapshotClient,
   type CodexPendingSteerProcessing,
   type CodexAggregateRootCompletion,
+  type CodexReasoningEffortSnapshot,
   type CodexSubagentHistoryReadClient,
 } from "./CodexSessionRuntime.ts";
 import {
@@ -918,6 +923,16 @@ describe("Codex terminal session state", () => {
   });
 });
 
+function makeReasoningEffortSnapshot(
+  effort: string | null | undefined,
+): CodexReasoningEffortSnapshot {
+  return {
+    providerThreadId: "provider-thread-1",
+    effort,
+    revision: Symbol(),
+  };
+}
+
 describe("Codex thread settings reconciliation", () => {
   const notification = {
     threadId: "provider-thread-1",
@@ -954,6 +969,155 @@ describe("Codex thread settings reconciliation", () => {
       }),
       undefined,
     );
+  });
+
+  it("distinguishes opening native-default null from unknown older-server effort", () => {
+    const unknown = observeCodexThreadOpenReasoningEffort({
+      current: undefined,
+      opened: makeThreadOpenResponse("provider-thread-1"),
+    });
+    const delegated = observeCodexThreadOpenReasoningEffort({
+      current: undefined,
+      opened: { ...makeThreadOpenResponse("provider-thread-1"), reasoningEffort: null },
+    });
+    assert.equal(unknown.effort, undefined);
+    assert.equal(delegated.effort, null);
+    for (const effort of ["high", "max", "ultra"]) {
+      assert.equal(
+        observeCodexThreadOpenReasoningEffort({
+          current: undefined,
+          opened: { ...makeThreadOpenResponse("provider-thread-1"), reasoningEffort: effort },
+        }).effort,
+        effort,
+      );
+    }
+  });
+
+  it("does not let a late opening ACK replace newer matching settings", () => {
+    const current = observeCodexThreadSettingsReasoningEffort({
+      current: makeReasoningEffortSnapshot("low"),
+      currentProviderThreadId: "provider-thread-1",
+      notification,
+    });
+    assert.equal(current?.effort, "ultra");
+    assert.strictEqual(
+      observeCodexThreadOpenReasoningEffort({
+        current,
+        opened: { ...makeThreadOpenResponse("provider-thread-1"), reasoningEffort: "low" },
+      }),
+      current,
+    );
+    assert.equal(
+      observeCodexThreadOpenReasoningEffort({
+        current,
+        opened: { ...makeThreadOpenResponse("different-root"), reasoningEffort: "high" },
+      }).effort,
+      "high",
+    );
+  });
+
+  it("ignores child and unidentified-root settings without changing ACK fences", () => {
+    const current = makeReasoningEffortSnapshot("high");
+    for (const currentProviderThreadId of ["provider-thread-child", undefined]) {
+      assert.strictEqual(
+        observeCodexThreadSettingsReasoningEffort({
+          current,
+          currentProviderThreadId,
+          notification,
+        }),
+        current,
+      );
+    }
+  });
+
+  it("preserves observed effort and ACK authority when a legacy notification omits effort", () => {
+    const { effort: _effort, ...threadSettings } = notification.threadSettings;
+    const { reasoning_effort: _reasoningEffort, ...settings } =
+      threadSettings.collaborationMode.settings;
+    const current = makeReasoningEffortSnapshot("max");
+    const observed = observeCodexThreadSettingsReasoningEffort({
+      current,
+      currentProviderThreadId: "provider-thread-1",
+      notification: {
+        ...notification,
+        threadSettings: {
+          ...threadSettings,
+          collaborationMode: { ...threadSettings.collaborationMode, settings },
+        },
+      },
+    });
+    assert.strictEqual(observed, current);
+  });
+
+  it("retains an explicit accepted legacy request, but never an unacknowledged selection", () => {
+    for (const effort of ["high", "max", "ultra"]) {
+      const initial = makeReasoningEffortSnapshot(null);
+      const requestToken = Symbol();
+      const admitted = admitCodexReasoningEffortRequest({
+        current: initial,
+        providerThreadId: initial.providerThreadId,
+        requestToken,
+      });
+      // Explicit rejection, transport uncertainty and malformed ACKs do not
+      // invoke the acceptance boundary and cannot alter the native selection.
+      assert.equal(admitted.effort, null);
+      assert.equal(
+        acknowledgeCodexReasoningEffortRequest({
+          current: admitted,
+          providerThreadId: initial.providerThreadId,
+          requestToken,
+          requestedRevision: initial.revision,
+          requestedEffort: effort,
+        })?.effort,
+        effort,
+      );
+      assert.strictEqual(
+        acknowledgeCodexReasoningEffortRequest({
+          current: admitted,
+          providerThreadId: initial.providerThreadId,
+          requestToken,
+          requestedRevision: initial.revision,
+          requestedEffort: undefined,
+        }),
+        admitted,
+      );
+    }
+  });
+
+  it("fences an old explicit ACK after a newer admitted root or native settings notification", () => {
+    const initial = makeReasoningEffortSnapshot("low");
+    const requestToken = Symbol();
+    const admitted = admitCodexReasoningEffortRequest({
+      current: initial,
+      providerThreadId: initial.providerThreadId,
+      requestToken,
+    });
+    const newerRequest = admitCodexReasoningEffortRequest({
+      current: admitted,
+      providerThreadId: initial.providerThreadId,
+      requestToken: Symbol(),
+    });
+    const newerSettings = observeCodexThreadSettingsReasoningEffort({
+      current: admitted,
+      currentProviderThreadId: initial.providerThreadId,
+      notification: {
+        ...notification,
+        threadSettings: { ...notification.threadSettings, effort: null },
+      },
+    });
+    assert.equal(newerSettings?.effort, null);
+    for (const current of [newerRequest, newerSettings, makeReasoningEffortSnapshot("max")]) {
+      assert.strictEqual(
+        acknowledgeCodexReasoningEffortRequest({
+          current,
+          providerThreadId: initial.providerThreadId,
+          requestToken,
+          requestedRevision: initial.revision,
+          requestedEffort: "high",
+        }),
+        current,
+      );
+    }
   });
 });
 
@@ -1892,6 +2056,7 @@ describe("buildTurnStartParams", () => {
         prompt: "Implement it",
         model: "gpt-5.3-codex",
         interactionMode: "default",
+        nativeReasoningEffort: null,
         attachments: [
           {
             type: "image",
@@ -1922,7 +2087,7 @@ describe("buildTurnStartParams", () => {
         mode: "default",
         settings: {
           model: "gpt-5.3-codex",
-          reasoning_effort: "medium",
+          reasoning_effort: null,
           developer_instructions: CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
         },
       },
@@ -1937,6 +2102,7 @@ describe("buildTurnStartParams", () => {
         prompt: "Continue with Codex",
         model: "gpt-5.3-codex",
         interactionMode: "auto",
+        nativeReasoningEffort: null,
       }),
     );
 
@@ -1969,6 +2135,52 @@ describe("buildTurnStartParams", () => {
         },
       ],
     });
+  });
+
+  it("preserves a native selected effort when the caller omits its override", () => {
+    for (const effort of ["low", "high", "ultra", "max"]) {
+      const params = Effect.runSync(
+        buildTurnStartParams({
+          threadId: "provider-thread-1",
+          runtimeMode: "full-access",
+          model: "gpt-6.1-sol",
+          interactionMode: "plan",
+          nativeReasoningEffort: effort,
+        }),
+      );
+      assert.equal(params.collaborationMode?.settings.reasoning_effort, effort);
+      assert.equal(params.effort, undefined);
+    }
+  });
+
+  it("gives explicit effort precedence over native selection and native-default delegation", () => {
+    for (const nativeReasoningEffort of ["high", null, undefined]) {
+      const params = Effect.runSync(
+        buildTurnStartParams({
+          threadId: "provider-thread-1",
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          effort: "ultra",
+          ...(nativeReasoningEffort !== undefined ? { nativeReasoningEffort } : {}),
+        }),
+      );
+      assert.equal(params.collaborationMode?.settings.reasoning_effort, "ultra");
+      assert.equal(params.effort, "ultra");
+    }
+  });
+
+  it("refuses an unknown native effort rather than guessing or clearing it", () => {
+    const exit = Effect.runSyncExit(
+      buildTurnStartParams({
+        threadId: "provider-thread-1",
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      }),
+    );
+    assert.equal(exit._tag, "Failure");
+    if (exit._tag === "Failure") {
+      assert.match(String(exit.cause), /Select a reasoning effort/);
+    }
   });
 
   it("includes additional directories as workspace-write writable roots", () => {
@@ -2195,6 +2407,73 @@ describe("Codex native root completion and aggregate input admission", () => {
         sessionRef: yield* Ref.make(session),
       };
     });
+
+  effectIt.effect(
+    "captures newer native effort atomically with admission instead of sending preflight effort",
+    () =>
+      Effect.gen(function* () {
+        for (const effort of ["ultra", null]) {
+          const boundary = yield* makeBoundary();
+          const initial = {
+            ...makeReasoningEffortSnapshot("low"),
+            providerThreadId: "native-root-thread",
+          };
+          const reasoningEffortSnapshotRef = yield* Ref.make<
+            CodexReasoningEffortSnapshot | undefined
+          >(initial);
+          const preflightParams = yield* buildTurnStartParams({
+            threadId: "native-root-thread",
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            ...(initial.effort !== undefined ? { nativeReasoningEffort: initial.effort } : {}),
+          });
+          // Model native settings arriving after preflight but before the
+          // waiting sender owns the lifecycle boundary. Settings observation
+          // and effort/request admission use the same runtime semaphore.
+          yield* boundary.semaphore.withPermits(1)(
+            Ref.update(reasoningEffortSnapshotRef, (current) =>
+              observeCodexThreadSettingsReasoningEffort({
+                current,
+                currentProviderThreadId: "native-root-thread",
+                notification: {
+                  threadId: "native-root-thread",
+                  threadSettings: {
+                    model: "gpt-6.1-sol",
+                    modelProvider: "openai",
+                    cwd: "/workspace",
+                    approvalPolicy: "never",
+                    approvalsReviewer: "user",
+                    sandboxPolicy: { type: "dangerFullAccess" },
+                    effort,
+                    collaborationMode: {
+                      mode: "default",
+                      settings: { model: "gpt-6.1-sol", reasoning_effort: effort },
+                    },
+                  },
+                },
+              }),
+            ),
+          );
+          const admission = yield* admitCodexTurnStartLifecycleBoundary({
+            ...boundary,
+            reasoningEffortSnapshotRef,
+            expectedCompletedRootTurnId: rootTurnId,
+          });
+          assert.notEqual(admission.reasoningEffortSnapshot?.revision, initial.revision);
+          assert.equal(admission.reasoningEffortSnapshot?.effort, effort);
+          assert.equal(admission.reasoningEffortSnapshot?.requestToken, admission.requestToken);
+          const admittedEffort = admission.reasoningEffortSnapshot?.effort;
+          const admittedParams = yield* buildTurnStartParams({
+            threadId: "native-root-thread",
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            ...(admittedEffort !== undefined ? { nativeReasoningEffort: admittedEffort } : {}),
+          });
+          assert.equal(preflightParams.collaborationMode?.settings.reasoning_effort, "low");
+          assert.equal(admittedParams.collaborationMode?.settings.reasoning_effort, effort);
+        }
+      }),
+  );
 
   it("exports exact successful root proof without mistaking child liveness for root activity", () => {
     const input = {

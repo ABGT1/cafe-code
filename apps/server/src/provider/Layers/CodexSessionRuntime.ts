@@ -964,6 +964,110 @@ export function resolveCodexThreadSettingsSessionModel(input: {
   return normalizeCodexModelSlug(input.notification.threadSettings.model);
 }
 
+/**
+ * Keep the native selected effort, not a guessed effective model default. At
+ * Codex 0.160.0 (a956835d020762cb2b570053af06f643a11c0ecc),
+ * core/src/session/session.rs config_snapshot/thread_settings_snapshot expose
+ * the retained collaboration-mode choice. `null` deliberately delegates to
+ * the model default; an absent field from an older server is still unknown.
+ * This state is private to one runtime and never enters prompts or persistence.
+ */
+export interface CodexReasoningEffortSnapshot {
+  readonly providerThreadId: string;
+  readonly effort: EffectCodexSchema.V2TurnStartParams__ReasoningEffort | null | undefined;
+  readonly revision: symbol;
+  readonly requestToken?: symbol | undefined;
+}
+
+export function observeCodexThreadOpenReasoningEffort(input: {
+  readonly current: CodexReasoningEffortSnapshot | undefined;
+  readonly opened: CodexThreadOpenResponse;
+}): CodexReasoningEffortSnapshot {
+  // A settings notification can run before the open RPC continuation. The
+  // matching notification is newer authority; a late opening ACK cannot reset
+  // it. A different thread's snapshot never supplies a resumed thread's choice.
+  if (input.current?.providerThreadId === input.opened.thread.id) {
+    return input.current;
+  }
+  return {
+    providerThreadId: input.opened.thread.id,
+    effort: input.opened.reasoningEffort,
+    revision: Symbol(),
+  };
+}
+
+export function observeCodexThreadSettingsReasoningEffort(input: {
+  readonly current: CodexReasoningEffortSnapshot | undefined;
+  readonly currentProviderThreadId: string | undefined;
+  readonly notification: EffectCodexSchema.V2ThreadSettingsUpdatedNotification;
+}): CodexReasoningEffortSnapshot | undefined {
+  // Until the runtime owns an exact root id, neither child nor unsolicited
+  // settings can establish its effort. Root model routing has its own legacy
+  // behavior; do not broaden that behavior to this retained selection.
+  if (
+    input.currentProviderThreadId === undefined ||
+    input.notification.threadId !== input.currentProviderThreadId
+  ) {
+    return input.current;
+  }
+  const settings = input.notification.threadSettings;
+  const effort =
+    settings.effort !== undefined
+      ? settings.effort
+      : settings.collaborationMode.settings.reasoning_effort;
+  // Absence carries no reset authority and is not an effort observation. A
+  // legacy model-only notification must preserve both the selected effort and
+  // a matching explicit request's ACK authority; null is a real observation.
+  if (effort === undefined) return input.current;
+  return {
+    providerThreadId: input.currentProviderThreadId,
+    effort,
+    revision: Symbol(),
+  };
+}
+
+export function admitCodexReasoningEffortRequest(input: {
+  readonly current: CodexReasoningEffortSnapshot | undefined;
+  readonly providerThreadId: string;
+  readonly requestToken: symbol;
+}): CodexReasoningEffortSnapshot {
+  const current =
+    input.current?.providerThreadId === input.providerThreadId ? input.current : undefined;
+  return {
+    providerThreadId: input.providerThreadId,
+    effort: current?.effort,
+    revision: current?.revision ?? Symbol(),
+    requestToken: input.requestToken,
+  };
+}
+
+export function acknowledgeCodexReasoningEffortRequest(input: {
+  readonly current: CodexReasoningEffortSnapshot | undefined;
+  readonly providerThreadId: string;
+  readonly requestToken: symbol;
+  readonly requestedRevision: symbol | undefined;
+  readonly requestedEffort: EffectCodexSchema.V2TurnStartParams__ReasoningEffort | undefined;
+}): CodexReasoningEffortSnapshot | undefined {
+  const current = input.current;
+  if (
+    current?.providerThreadId !== input.providerThreadId ||
+    current.requestToken !== input.requestToken ||
+    current.revision !== input.requestedRevision ||
+    input.requestedEffort === undefined
+  ) {
+    return current;
+  }
+  // Older servers may not publish settings. A definitive, decoded ACK still
+  // proves an explicit request was accepted. Only its exact admission and
+  // unchanged observation revision may retain that choice: a newer admitted
+  // root or settings notice fences a terminal-before-ACK/delayed response.
+  return {
+    providerThreadId: input.providerThreadId,
+    effort: input.requestedEffort,
+    revision: Symbol(),
+  };
+}
+
 function readResumeCursorThreadId(
   resumeCursor: ProviderSession["resumeCursor"],
 ): string | undefined {
@@ -1116,7 +1220,7 @@ function runtimeModeToTurnSandboxPolicy(
 function buildCodexCollaborationMode(input: {
   readonly interactionMode?: ProviderInteractionMode;
   readonly model?: string;
-  readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
+  readonly effort: EffectCodexSchema.V2TurnStartParams__ReasoningEffort | null;
 }): EffectCodexSchema.V2TurnStartParams__CollaborationMode | undefined {
   if (input.interactionMode === undefined) {
     return undefined;
@@ -1132,7 +1236,7 @@ function buildCodexCollaborationMode(input: {
     mode,
     settings: {
       model,
-      reasoning_effort: input.effort ?? "medium",
+      reasoning_effort: input.effort,
       developer_instructions:
         mode === "plan"
           ? CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS
@@ -1153,11 +1257,12 @@ export function buildTurnStartParams(input: {
   readonly model?: string;
   readonly serviceTier?: CodexServiceTier;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
+  readonly nativeReasoningEffort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort | null;
   readonly interactionMode?: ProviderInteractionMode;
   readonly additionalDirectories?: ReadonlyArray<string> | undefined;
 }): Effect.Effect<
   CodexTurnStartParamsWithExperimentalFields,
-  CodexErrors.CodexAppServerProtocolParseError
+  CodexErrors.CodexAppServerProtocolParseError | CodexErrors.CodexAppServerRequestError
 > {
   const turnInput: Array<EffectCodexSchema.V2TurnStartParams__UserInput> = [];
   if (input.prompt) {
@@ -1171,10 +1276,22 @@ export function buildTurnStartParams(input: {
   }
 
   const config = runtimeModeToThreadConfig(input.runtimeMode);
+  const collaborationEffort = input.effort ?? input.nativeReasoningEffort;
+  if (input.interactionMode !== undefined && collaborationEffort === undefined) {
+    // A full collaboration mode replaces the retained native choice
+    // (core/src/session/step_settings.rs:264-270 in Codex 0.160.0). Omitting or
+    // nulling its effort is not inheritance. Refuse unknown legacy state before
+    // I/O instead of silently spending at Medium or clearing a saved choice.
+    return Effect.fail(
+      CodexErrors.CodexAppServerRequestError.invalidRequest(
+        "Select a reasoning effort for this Codex turn; the provider did not report its current effort.",
+      ),
+    );
+  }
   const collaborationMode = buildCodexCollaborationMode({
     ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
     ...(input.model ? { model: input.model } : {}),
-    ...(input.effort ? { effort: input.effort } : {}),
+    effort: collaborationEffort ?? null,
   });
   const runtimeWorkspaceRoots = input.cwd
     ? buildRuntimeWorkspaceRoots({
@@ -3114,6 +3231,9 @@ export const admitCodexTurnStartLifecycleBoundary = Effect.fn(
   readonly manualCompactionPendingRef: Ref.Ref<boolean>;
   readonly closedRef: Ref.Ref<boolean>;
   readonly sessionRef: Ref.Ref<ProviderSession>;
+  readonly reasoningEffortSnapshotRef?:
+    | Ref.Ref<CodexReasoningEffortSnapshot | undefined>
+    | undefined;
   readonly expectedCompletedRootTurnId?: TurnId | undefined;
   readonly allowActiveTurnSteerFallback?: boolean | undefined;
 }) {
@@ -3175,10 +3295,25 @@ export const admitCodexTurnStartLifecycleBoundary = Effect.fn(
         const requestToken = Symbol();
         yield* Ref.set(input.nativeTurnStartPendingRef, true);
         yield* Ref.set(input.nativeTurnStartRequestRef, requestToken);
+        let reasoningEffortSnapshot: CodexReasoningEffortSnapshot | undefined;
+        const providerThreadId = currentProviderThreadId(session);
+        if (input.reasoningEffortSnapshotRef !== undefined && providerThreadId !== undefined) {
+          reasoningEffortSnapshot = admitCodexReasoningEffortRequest({
+            current: yield* Ref.get(input.reasoningEffortSnapshotRef),
+            providerThreadId,
+            requestToken,
+          });
+          // Capture the selection and bind its request token in the same
+          // serialized admission as the root. A paused older continuation may
+          // neither overwrite a newer admission nor send a pre-admission effort
+          // after authoritative root settings have already changed it.
+          yield* Ref.set(input.reasoningEffortSnapshotRef, reasoningEffortSnapshot);
+        }
         return {
           requestedRootLifecycleEpoch,
           requestToken,
           supersededAggregateTurnId: completion?.turnId,
+          reasoningEffortSnapshot,
         };
       }),
     ),
@@ -4474,6 +4609,9 @@ export const makeCodexSessionRuntime = (
       updatedAt: sessionCreatedAt,
     } satisfies ProviderSession;
     const sessionRef = yield* Ref.make<ProviderSession>(initialSession);
+    const reasoningEffortSnapshotRef = yield* Ref.make<CodexReasoningEffortSnapshot | undefined>(
+      undefined,
+    );
     const offerEvent = (event: ProviderEvent) => Queue.offer(events, event).pipe(Effect.asVoid);
 
     const emitEvent = (
@@ -6159,7 +6297,15 @@ export const makeCodexSessionRuntime = (
           // Keep Cafe's live session model aligned with the app-server's
           // authoritative notification so later turns cannot fall back to a
           // stale pre-resume or pre-override model.
-          return updateSession(sessionRef, { model });
+          return aggregateLifecycleSemaphore.withPermits(1)(
+            Ref.update(reasoningEffortSnapshotRef, (current) =>
+              observeCodexThreadSettingsReasoningEffort({
+                current,
+                currentProviderThreadId: providerThreadId,
+                notification: payload,
+              }),
+            ).pipe(Effect.andThen(updateSession(sessionRef, { model }))),
+          );
         }),
       ),
     );
@@ -6568,6 +6714,9 @@ export const makeCodexSessionRuntime = (
       });
 
       const providerThreadId = opened.thread.id;
+      yield* Ref.update(reasoningEffortSnapshotRef, (current) =>
+        observeCodexThreadOpenReasoningEffort({ current, opened }),
+      );
       const activeSnapshotTurn = selectCodexActiveSnapshotTurn(opened.thread);
       const activeSnapshotTurnId = activeSnapshotTurn
         ? TurnId.make(activeSnapshotTurn.id)
@@ -6713,33 +6862,72 @@ export const makeCodexSessionRuntime = (
           );
           const effectiveAdditionalDirectories =
             input.additionalDirectories ?? options.additionalDirectories ?? [];
-          const params = yield* buildTurnStartParams({
-            threadId: providerThreadId,
-            cwd: options.cwd,
-            runtimeMode: options.runtimeMode,
-            ...(input.input ? { prompt: input.input } : {}),
-            ...(input.attachments ? { attachments: input.attachments } : {}),
-            ...(normalizedModel ? { model: normalizedModel } : {}),
-            ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
-            ...(input.effort ? { effort: input.effort } : {}),
-            ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
-            additionalDirectories: effectiveAdditionalDirectories,
-          });
+          const reasoningEffortSnapshot = yield* Ref.get(reasoningEffortSnapshotRef);
+          const nativeReasoningEffort =
+            reasoningEffortSnapshot?.providerThreadId === providerThreadId
+              ? reasoningEffortSnapshot.effort
+              : undefined;
+          const buildParams = (
+            nativeReasoningEffort:
+              | EffectCodexSchema.V2TurnStartParams__ReasoningEffort
+              | null
+              | undefined,
+          ) =>
+            buildTurnStartParams({
+              threadId: providerThreadId,
+              cwd: options.cwd,
+              runtimeMode: options.runtimeMode,
+              ...(input.input ? { prompt: input.input } : {}),
+              ...(input.attachments ? { attachments: input.attachments } : {}),
+              ...(normalizedModel ? { model: normalizedModel } : {}),
+              ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+              ...(input.effort ? { effort: input.effort } : {}),
+              ...(nativeReasoningEffort !== undefined ? { nativeReasoningEffort } : {}),
+              ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
+              additionalDirectories: effectiveAdditionalDirectories,
+            });
+          let params = yield* buildParams(nativeReasoningEffort);
           const turnStartRequestedAt = yield* nowIso;
           const turnStartRequestedAtMs = yield* Clock.currentTimeMillis;
-          const { requestedRootLifecycleEpoch, requestToken, supersededAggregateTurnId } =
-            yield* admitCodexTurnStartLifecycleBoundary({
-              semaphore: aggregateLifecycleSemaphore,
-              completionsRef: aggregateRootCompletionsRef,
-              rootLifecycleEpochRef: rootTurnLifecycleEpochRef,
-              nativeTurnStartPendingRef,
-              nativeTurnStartRequestRef,
-              manualCompactionPendingRef,
-              closedRef,
-              sessionRef,
-              expectedCompletedRootTurnId: input.expectedCompletedRootTurnId,
-              allowActiveTurnSteerFallback: input.allowActiveTurnSteerFallback,
-            });
+          const {
+            requestedRootLifecycleEpoch,
+            requestToken,
+            supersededAggregateTurnId,
+            reasoningEffortSnapshot: admittedReasoningEffortSnapshot,
+          } = yield* admitCodexTurnStartLifecycleBoundary({
+            semaphore: aggregateLifecycleSemaphore,
+            completionsRef: aggregateRootCompletionsRef,
+            rootLifecycleEpochRef: rootTurnLifecycleEpochRef,
+            nativeTurnStartPendingRef,
+            nativeTurnStartRequestRef,
+            manualCompactionPendingRef,
+            closedRef,
+            sessionRef,
+            reasoningEffortSnapshotRef,
+            expectedCompletedRootTurnId: input.expectedCompletedRootTurnId,
+            allowActiveTurnSteerFallback: input.allowActiveTurnSteerFallback,
+          });
+          if (admittedReasoningEffortSnapshot?.revision !== reasoningEffortSnapshot?.revision) {
+            // Preflight validation happens before reserving a native start.
+            // If settings changed while waiting for admission, rebuild only
+            // the local wire object from the atomically admitted selection.
+            // No inference, provider probe, or provider request is replayed.
+            params = yield* buildParams(admittedReasoningEffortSnapshot?.effort).pipe(
+              Effect.tapError(() =>
+                rejectCodexTurnStartLifecycleBoundary({
+                  semaphore: aggregateLifecycleSemaphore,
+                  nativeTurnStartPendingRef,
+                  nativeTurnStartRequestRef,
+                  requestToken,
+                  // Local validation failed before transport I/O, so releasing
+                  // this exact reservation cannot replay an uncertain request.
+                  error: CodexErrors.CodexAppServerRequestError.invalidRequest(
+                    "The Codex turn could not be prepared.",
+                  ),
+                }),
+              ),
+            );
+          }
           const rawResponse = yield* client.raw.request("turn/start", params).pipe(
             Effect.tapError((error) =>
               rejectCodexTurnStartLifecycleBoundary({
@@ -6759,6 +6947,20 @@ export const makeCodexSessionRuntime = (
             ),
           );
           const turnId = TurnId.make(response.turn.id);
+          yield* aggregateLifecycleSemaphore.withPermits(1)(
+            Effect.gen(function* () {
+              if (yield* Ref.get(closedRef)) return;
+              yield* Ref.update(reasoningEffortSnapshotRef, (current) =>
+                acknowledgeCodexReasoningEffortRequest({
+                  current,
+                  providerThreadId,
+                  requestToken,
+                  requestedRevision: admittedReasoningEffortSnapshot?.revision,
+                  requestedEffort: input.effort,
+                }),
+              );
+            }),
+          );
           yield* recordTurnStartObservation({
             providerThreadId,
             turnId,

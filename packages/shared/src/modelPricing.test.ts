@@ -77,6 +77,7 @@ describe("resolveModelRate", () => {
     ["claude-opus-4-6", { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 }],
     ["claude-opus-4-5", { input: 5, cachedInput: 0.5, cacheWrite: 6.25, output: 25 }],
     ["claude-sonnet-5", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 10 }],
+    ["claude-sonnet-5-5", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 10 }],
     ["claude-haiku-4-5", { input: 1, cachedInput: 0.1, cacheWrite: 1.25, output: 5 }],
   ] as const)("uses the published standard rates for %s and preserves overrides", (model, rate) => {
     expect(resolveModelRate(model)).toEqual(rate);
