@@ -8,6 +8,8 @@ import { PROVIDER_ICON_BY_PROVIDER } from "../chat/providerIconUtils";
 import { UsageAreaChart, type UsageChartSeries } from "../stats/UsageAreaChart";
 import { useCountUp } from "../stats/useCountUp";
 import { dailyUsageCost } from "../stats/dailyUsageCost";
+import { selectUsageRange, type UsageRangeKey } from "../stats/usageRange";
+import { UsageRangeSelector } from "../stats/UsageRangeSelector";
 import { SettingsSection } from "./settingsLayout";
 import {
   formatCompactTokenCount,
@@ -55,23 +57,10 @@ function formatShare(percent: number, tokens: number): string {
 
 type Mode = "cost" | "tokens";
 
-/**
- * Chart window. The daily ledger is the only day-indexed data we have, so a
- * range narrows the chart and the in-range subtotal beside it. The headline and
- * the model table stay explicitly lifetime figures. Only the chart uses the
- * per-day model breakdown; switching ranges must not relabel the headline.
- */
-const RANGES = [
-  { key: "7", label: "7 days", days: 7 },
-  { key: "30", label: "30 days", days: 30 },
-  { key: "90", label: "90 days", days: 90 },
-  { key: "all", label: "All", days: Number.POSITIVE_INFINITY },
-] as const;
-type RangeKey = (typeof RANGES)[number]["key"];
-
 const TOKEN_BAND_COLORS = {
   cached: "#48cfff",
   fresh: "#a78bfa",
+  written: "#fbbf24",
   output: "#4ade80",
 } as const;
 
@@ -182,12 +171,57 @@ function StatTile(props: StatTileProps) {
  * surface-agnostic: colours come from theme tokens and the caller owns the
  * background, padding and heading.
  */
-export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null }) {
+export function UsageCostContent({
+  usage,
+  range: controlledRange,
+  showRangeSelector = true,
+}: {
+  usage: UsageStatsGetResult | null;
+  range?: UsageRangeKey;
+  showRangeSelector?: boolean;
+}) {
+  const [localRange, setLocalRange] = useState<UsageRangeKey>("30");
+  const range = controlledRange ?? localRange;
+  const [mode, setMode] = useState<Mode>("cost");
+  const selected = useMemo(
+    () => (usage === null ? null : selectUsageRange(usage, range)),
+    [usage, range],
+  );
+
+  // The mode survives period changes, but the numeric odometers must not:
+  // tweening lifetime counters into a seven-day figure briefly labels values
+  // from another period as if they belonged to the new one.
+  return (
+    <UsageCostMetrics
+      key={`${range}:${selected?.today.day ?? "loading"}`}
+      usage={selected}
+      mode={mode}
+      setMode={setMode}
+      range={range}
+      setRange={setLocalRange}
+      showRangeSelector={showRangeSelector && controlledRange === undefined}
+    />
+  );
+}
+
+function UsageCostMetrics({
+  usage,
+  mode,
+  setMode,
+  range,
+  setRange,
+  showRangeSelector,
+}: {
+  usage: UsageStatsGetResult | null;
+  mode: Mode;
+  setMode: (mode: Mode) => void;
+  range: UsageRangeKey;
+  setRange: (range: UsageRangeKey) => void;
+  showRangeSelector: boolean;
+}) {
   const overrides = useSettings((settings) => settings.modelPricingOverrides) as
     | Record<string, ModelRate>
     | undefined;
-  const [mode, setMode] = useState<Mode>("cost");
-  const [range, setRange] = useState<RangeKey>("30");
 
   const view = useMemo(() => {
     const breakdown = usage?.tokenBreakdown ?? [];
@@ -240,6 +274,7 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
       providers,
       models,
       processed: input + output,
+      input,
       cached,
       written,
       fresh: Math.max(0, input - cached - written),
@@ -262,11 +297,12 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
   const outputDisplay = useCountUp(view.output);
 
   const chart = useMemo(() => {
-    const all = usage?.days ?? [];
-    const window = RANGES.find((entry) => entry.key === range)?.days ?? 30;
-    const days = Number.isFinite(window) ? all.slice(-window) : all;
+    const days = usage?.days ?? [];
     const labels = days.map((day) => day.day.slice(5));
-    const rangeTokens = days.reduce((total, day) => total + day.inputTokens + day.outputTokens, 0);
+    // All may contain lifetime volume predating the daily ledger. Keep the
+    // range counter consistent with the dashboard rather than silently drop
+    // that history simply because it cannot be placed on the daily graph.
+    const rangeTokens = view.processed;
     if (mode === "tokens") {
       const series: UsageChartSeries[] = [
         {
@@ -282,6 +318,15 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
           values: days.map((day) =>
             Math.max(0, day.inputTokens - day.cachedInputTokens - day.cacheWriteInputTokens),
           ),
+        },
+        {
+          // Cache writes are already included in processed input, but not in
+          // either the cached-read or fresh-input band. Keep them explicit so
+          // the stacked graph accounts for the same tokens as the totals.
+          key: "written",
+          label: "Cache writes",
+          color: TOKEN_BAND_COLORS.written,
+          values: days.map((day) => day.cacheWriteInputTokens),
         },
         {
           key: "output",
@@ -317,9 +362,12 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
       hasUnpriced: days.some((day) => (dailyCosts.get(day.day)?.unpricedTokens ?? 0) > 0),
       format: (value: number) => formatUsd(value),
     };
-  }, [usage, mode, range, overrides]);
+  }, [usage, mode, overrides, view.processed]);
 
-  const share = view.rollup.pricedTokens + view.rollup.unpricedTokens;
+  // Missing model attribution is real recorded usage, but has no trustworthy
+  // rate. Include that gap in cost quality instead of implying 100% coverage.
+  const share = Math.max(view.processed, view.rollup.pricedTokens + view.rollup.unpricedTokens);
+  const unpricedTokens = Math.max(0, share - view.rollup.pricedTokens);
   const pricedPercent = share === 0 ? null : (view.rollup.pricedTokens / share) * 100;
   const maxProviderCost = Math.max(0, ...view.providers.map((entry) => entry.cost));
 
@@ -327,7 +375,8 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
     // This content also appears in Atrium. Container queries must live here,
     // rather than assume either surface occupies the full browser viewport.
     <div className="@container/usage-cost min-w-0" data-usage-cost-layout>
-      <div className="flex justify-end px-4 pt-3 sm:px-5">
+      <div className="flex flex-wrap items-center justify-end gap-3 px-4 pt-3 sm:px-5">
+        {showRangeSelector ? <UsageRangeSelector value={range} onChange={setRange} /> : null}
         <div className="flex overflow-hidden rounded-md border border-border/70 text-[11px]">
           {(["cost", "tokens"] as const).map((option) => (
             <button
@@ -417,22 +466,6 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
                 Partial estimate: usage without daily model pricing is excluded.
               </span>
             ) : null}
-            <div className="flex overflow-hidden rounded-md border border-border/70">
-              {RANGES.map((entry) => (
-                <button
-                  key={entry.key}
-                  type="button"
-                  onClick={() => setRange(entry.key)}
-                  aria-pressed={range === entry.key}
-                  className={cn(
-                    "px-2 py-0.5 transition-colors",
-                    range === entry.key ? "bg-foreground text-background" : "hover:text-foreground",
-                  )}
-                >
-                  {entry.label}
-                </button>
-              ))}
-            </div>
             <TokenCountFigure
               value={chart.rangeTokens}
               context="range"
@@ -446,6 +479,7 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
                   [
                     ["Cached", TOKEN_BAND_COLORS.cached],
                     ["Fresh", TOKEN_BAND_COLORS.fresh],
+                    ["Cache writes", TOKEN_BAND_COLORS.written],
                     ["Output", TOKEN_BAND_COLORS.output],
                   ] as const
                 ).map(([label, color]) => (
@@ -489,8 +523,8 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
           label="Cached input"
           rawTokens={cachedDisplay}
           detail={
-            view.cached + view.fresh > 0
-              ? `${((view.cached / (view.cached + view.fresh)) * 100).toFixed(1)}% of input`
+            view.input > 0
+              ? `${((view.cached / view.input) * 100).toFixed(1)}% of input`
               : undefined
           }
         />
@@ -599,9 +633,7 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
             <div className="flex items-baseline gap-2">
               <dt className="text-muted-foreground">Unpriced</dt>
               <dd className="ml-auto tabular-nums">
-                {pricedPercent === null
-                  ? "—"
-                  : formatShare(100 - pricedPercent, view.rollup.unpricedTokens)}
+                {pricedPercent === null ? "—" : formatShare(100 - pricedPercent, unpricedTokens)}
               </dd>
             </div>
             <div className="flex items-baseline gap-2">
@@ -629,10 +661,16 @@ export function UsageCostContent({ usage }: { usage: UsageStatsGetResult | null 
 }
 
 /** Settings → Usage placement. */
-export function UsageCostSection({ usage }: { usage: UsageStatsGetResult | null }) {
+export function UsageCostSection({
+  usage,
+  range,
+}: {
+  usage: UsageStatsGetResult | null;
+  range: UsageRangeKey;
+}) {
   return (
     <SettingsSection title="Cost (USD)">
-      <UsageCostContent usage={usage} />
+      <UsageCostContent usage={usage} range={range} showRangeSelector={false} />
     </SettingsSection>
   );
 }

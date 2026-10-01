@@ -1,8 +1,23 @@
-import { useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { UsageStatsDay } from "@cafecode/contracts";
+
+import { usageDayToUtcDayIndex, utcDayIndexToUsageDay } from "./usageRange";
 
 /** ~6 months of history, GitHub-style week columns. */
 const WEEKS = 26;
+/** Bounded calendars keep readable cells instead of stretching seven days across a card. */
+const BOUNDED_CELL_SIZE_REM = 0.875;
+const BOUNDED_CELL_GAP_REM = 0.1875;
+/**
+ * At most two years are cheap to lay out in full. Longer calendars retain their
+ * complete scroll extent but materialize only the viewport plus nearby weeks.
+ * Bounds admit four-digit years, so a valid old date must not allocate millions
+ * of empty day objects or DOM nodes merely because All was selected.
+ */
+const VIRTUALIZE_AFTER_WEEKS = 104;
+const VIRTUAL_WEEK_OVERSCAN = 4;
+const DEFAULT_ROOT_FONT_SIZE = 16;
+const DEFAULT_VIEWPORT_WIDTH = 640;
 /**
  * Steepness of the exponential intensity curve. Higher spreads the top of the
  * range apart (peak days stand out more) at the cost of dimming mid days.
@@ -86,13 +101,18 @@ function formatCellDuration(generatingMs: number): string {
 }
 
 function formatCellDate(dayKey: string): string {
-  const [year, month, day] = dayKey.split("-").map(Number);
-  const date = new Date(year ?? 1970, (month ?? 1) - 1, day ?? 1);
+  // UTC is a calendar representation here, not a conversion of the server's
+  // local day into a browser-local instant. Explicit UTC formatting keeps both
+  // the weekday and date stable across browser timezones and DST transitions.
+  const dayIndex = usageDayToUtcDayIndex(dayKey);
+  if (dayIndex === undefined) return dayKey;
+  const date = new Date(dayIndex * 86_400_000);
   return date.toLocaleDateString(undefined, {
     weekday: "short",
     month: "short",
     day: "numeric",
     year: "numeric",
+    timeZone: "UTC",
   });
 }
 
@@ -102,158 +122,410 @@ interface HeatmapCell {
   readonly inRange: boolean;
 }
 
+interface HeatmapWeek {
+  readonly index: number;
+  readonly cells: ReadonlyArray<HeatmapCell>;
+}
+
+interface CalendarViewport {
+  readonly calendarKey: string;
+  readonly scrollLeft: number;
+  readonly width: number;
+  readonly rootFontSize: number;
+}
+
 interface HoveredCell {
   readonly dayKey: string;
-  readonly generatingMs: number;
   /** Cell center, in fractions of the grid box, for tooltip placement. */
   readonly xFraction: number;
   readonly yFraction: number;
+  /** Hide a tooltip as soon as its calendar is replaced by another range. */
+  readonly calendarKey: string;
+  /** Bounded calendars place their tooltip outside the horizontal scroller. */
+  readonly anchorX: number;
+  readonly anchorY: number;
 }
 
 /**
- * GitHub-style activity calendar: week columns x 7 day rows ending today,
+ * GitHub-style activity calendar: week columns x 7 day rows,
  * colored by generating time per day relative to the busiest day shown. One
  * shared tooltip follows the hovered cell instead of one instance per cell.
  */
 export function ActivityHeatmap({
   days,
   today,
+  bounds,
   className,
 }: {
   days: ReadonlyArray<UsageStatsDay>;
   /** Live value for today's cell; supersedes the fetched history. */
   today?: UsageStatsDay | undefined;
+  /** Inclusive server-local calendar keys. Omission preserves the 26-week default. */
+  bounds?: { readonly startDay: string; readonly endDay: string } | undefined;
   className?: string;
 }) {
   const [hovered, setHovered] = useState<HoveredCell | null>(null);
+  const calendarViewportRef = useRef<HTMLDivElement>(null);
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const [viewport, setViewport] = useState<CalendarViewport | null>(null);
+  const bounded = bounds !== undefined;
+  const startDayKey = bounds?.startDay;
+  const endDayKey = bounds?.endDay;
+  const todayDayKey = today?.day;
+  const todayGeneratingMs = today?.generatingMs;
+  const byDay = useMemo(() => new Map(days.map((day) => [day.day, day.generatingMs])), [days]);
 
-  const { weeks, monthLabelByWeek, maxMs } = useMemo(() => {
-    const byDay = new Map(days.map((day) => [day.day, day.generatingMs]));
-    if (today !== undefined) {
-      byDay.set(today.day, today.generatingMs);
+  const { rangeStart, start, endDay, weekCount, historicalMaxMs, calendarKey } = useMemo(() => {
+    const endDay = usageDayToUtcDayIndex(bounded ? (endDayKey ?? "") : dayKeyOf(new Date()));
+    const explicitStartDay = bounded ? usageDayToUtcDayIndex(startDayKey ?? "") : undefined;
+    // Invalid explicit bounds fail closed. In particular they must not silently
+    // replace the server's day anchor with the browser's unrelated current date.
+    if (
+      endDay === undefined ||
+      (bounded && (explicitStartDay === undefined || explicitStartDay > endDay))
+    ) {
+      return {
+        rangeStart: 0,
+        start: 0,
+        endDay: -1,
+        weekCount: 0,
+        historicalMaxMs: 0,
+        calendarKey: "",
+      };
     }
-
-    const now = new Date();
-    const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    // Start on the Sunday that begins the earliest column.
-    const start = new Date(endOfToday.getTime());
-    start.setDate(start.getDate() - start.getDay() - (WEEKS - 1) * 7);
-
-    const columns: Array<Array<HeatmapCell>> = [];
-    const labels = new Map<number, string>();
-    let previousMonth = -1;
+    // The Unix epoch was a Thursday. Integer day arithmetic aligns Sunday
+    // columns without local Date setters, whose offsets can change at DST.
+    const weekdayOf = (dayIndex: number) => (((dayIndex + 4) % 7) + 7) % 7;
+    const rangeStart = explicitStartDay ?? endDay - weekdayOf(endDay) - (WEEKS - 1) * 7;
+    const start = rangeStart - weekdayOf(rangeStart);
+    const weekCount = Math.floor((endDay - start) / 7) + 1;
     let max = 0;
-    for (let week = 0; week < WEEKS; week += 1) {
-      const column: Array<HeatmapCell> = [];
+    // Scale only recorded in-range activity. Walking every empty calendar date
+    // here would defeat virtualization for sparse or exceptionally old history.
+    for (const [dayKey, generatingMs] of byDay) {
+      // Today's live value replaces its fetched row, including when it falls
+      // below that row. Exclude it from the historical peak so current updates
+      // can change the peak in O(1), without rescanning lifetime history.
+      if (dayKey === todayDayKey) continue;
+      const dayIndex = usageDayToUtcDayIndex(dayKey);
+      if (dayIndex !== undefined && dayIndex >= rangeStart && dayIndex <= endDay) {
+        max = Math.max(max, generatingMs);
+      }
+    }
+    return {
+      rangeStart,
+      start,
+      endDay,
+      weekCount,
+      historicalMaxMs: max,
+      calendarKey: `${bounded}:${rangeStart}:${endDay}`,
+    };
+  }, [byDay, todayDayKey, bounded, startDayKey, endDayKey]);
+  const todayDayIndex = todayDayKey === undefined ? undefined : usageDayToUtcDayIndex(todayDayKey);
+  const maxMs =
+    todayDayIndex !== undefined && todayDayIndex >= rangeStart && todayDayIndex <= endDay
+      ? Math.max(historicalMaxMs, todayGeneratingMs ?? 0)
+      : historicalMaxMs;
+
+  const virtualized = bounded && weekCount > VIRTUALIZE_AFTER_WEEKS;
+  // The viewport snapshot belongs to an exact calendar. Range changes begin at
+  // its first week even before the layout effect resets the real scroll offset.
+  const currentViewport = viewport?.calendarKey === calendarKey ? viewport : null;
+  const weekSizePx =
+    (BOUNDED_CELL_SIZE_REM + BOUNDED_CELL_GAP_REM) *
+    (currentViewport?.rootFontSize ?? DEFAULT_ROOT_FONT_SIZE);
+  const visibleWeekCount = Math.ceil(
+    (currentViewport?.width ?? DEFAULT_VIEWPORT_WIDTH) / weekSizePx,
+  );
+  const firstVisibleWeek = Math.floor((currentViewport?.scrollLeft ?? 0) / weekSizePx);
+  const firstRenderedWeek = virtualized ? Math.max(0, firstVisibleWeek - VIRTUAL_WEEK_OVERSCAN) : 0;
+  const endRenderedWeek = virtualized
+    ? Math.min(weekCount, firstVisibleWeek + visibleWeekCount + VIRTUAL_WEEK_OVERSCAN + 1)
+    : weekCount;
+  const renderedWeekCount = Math.max(0, endRenderedWeek - firstRenderedWeek);
+
+  useLayoutEffect(() => {
+    const scroller = scrollerRef.current;
+    if (!scroller || !bounded) return;
+    scroller.scrollLeft = 0;
+    const observeViewport = () => {
+      const rootFontSize = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+      const next = {
+        calendarKey,
+        scrollLeft: scroller.scrollLeft,
+        width: scroller.clientWidth,
+        rootFontSize: rootFontSize > 0 ? rootFontSize : DEFAULT_ROOT_FONT_SIZE,
+      };
+      setViewport((current) =>
+        current?.calendarKey === next.calendarKey &&
+        current.scrollLeft === next.scrollLeft &&
+        current.width === next.width &&
+        current.rootFontSize === next.rootFontSize
+          ? current
+          : next,
+      );
+    };
+    observeViewport();
+    // Both viewport width and cell height change with interface scaling. The
+    // observer remeasures the rem unit so scrolling retains exact day alignment.
+    const observer = new ResizeObserver(observeViewport);
+    observer.observe(scroller);
+    return () => observer.disconnect();
+  }, [bounded, calendarKey]);
+
+  const { weeks, monthLabelByWeek } = useMemo(() => {
+    const columns: HeatmapWeek[] = [];
+    const labels = new Map<number, string>();
+    let previousMonth =
+      firstRenderedWeek > 0
+        ? new Date(
+            Math.max(start + (firstRenderedWeek - 1) * 7, rangeStart) * 86_400_000,
+          ).getUTCMonth()
+        : -1;
+    for (let week = firstRenderedWeek; week < endRenderedWeek; week += 1) {
+      const column: HeatmapCell[] = [];
       for (let weekday = 0; weekday < 7; weekday += 1) {
-        const date = new Date(start.getTime());
-        date.setDate(date.getDate() + week * 7 + weekday);
-        const dayKey = dayKeyOf(date);
-        const inRange = date.getTime() <= endOfToday.getTime();
-        const generatingMs = byDay.get(dayKey) ?? 0;
-        if (inRange && generatingMs > max) {
-          max = generatingMs;
-        }
+        const dayIndex = start + week * 7 + weekday;
+        const inRange = dayIndex >= rangeStart && dayIndex <= endDay;
+        // Alignment padding can cross the four-digit calendar boundary at
+        // year 0000/9999. Preserve expanded ISO years there so inert cells still
+        // have unique keys; selected dates remain canonical server day keys.
+        const dayKey = inRange
+          ? utcDayIndexToUsageDay(dayIndex)
+          : new Date(dayIndex * 86_400_000).toISOString().split("T")[0]!;
+        // Alignment cells are empty even if fetched history contains activity
+        // there; neither their color nor the selected range's intensity scale
+        // may be influenced by dates outside the requested calendar.
+        const generatingMs = inRange
+          ? dayKey === todayDayKey
+            ? (todayGeneratingMs ?? 0)
+            : (byDay.get(dayKey) ?? 0)
+          : 0;
         column.push({ dayKey, generatingMs, inRange });
       }
-      const firstOfColumn = new Date(start.getTime());
-      firstOfColumn.setDate(firstOfColumn.getDate() + week * 7);
+      const firstOfColumn = new Date(Math.max(start + week * 7, rangeStart) * 86_400_000);
       // Label a column when the month changes at its start, skipping a label
       // crammed into the very last columns.
-      if (firstOfColumn.getMonth() !== previousMonth) {
-        if (week > 0 || firstOfColumn.getDate() <= 7) {
-          labels.set(week, MONTH_LABELS[firstOfColumn.getMonth()] ?? "");
+      if (firstOfColumn.getUTCMonth() !== previousMonth) {
+        if (bounded || week > 0 || firstOfColumn.getUTCDate() <= 7) {
+          labels.set(week, MONTH_LABELS[firstOfColumn.getUTCMonth()] ?? "");
         }
-        previousMonth = firstOfColumn.getMonth();
+        previousMonth = firstOfColumn.getUTCMonth();
       }
-      columns.push(column);
+      columns.push({ index: week, cells: column });
     }
-    return { weeks: columns, monthLabelByWeek: labels, maxMs: max };
-  }, [days, today]);
+    return {
+      weeks: columns,
+      monthLabelByWeek: labels,
+    };
+  }, [
+    firstRenderedWeek,
+    endRenderedWeek,
+    start,
+    rangeStart,
+    endDay,
+    byDay,
+    bounded,
+    todayDayKey,
+    todayGeneratingMs,
+  ]);
+  const activeHover = hovered?.calendarKey === calendarKey ? hovered : null;
+  const tooltipDuration = activeHover
+    ? formatCellDuration(
+        activeHover.dayKey === todayDayKey
+          ? (todayGeneratingMs ?? 0)
+          : (byDay.get(activeHover.dayKey) ?? 0),
+      )
+    : "";
+  useLayoutEffect(() => {
+    const tooltip = tooltipRef.current;
+    const calendarViewport = calendarViewportRef.current;
+    if (!bounded || !activeHover || !tooltip || !calendarViewport) return;
+    // The scroll viewport can be narrower than a date tooltip. Clamp its actual
+    // measured width inside the panel rather than assuming a fixed text length
+    // or relying on fractions that only work on a wide calendar.
+    const maxLeft = Math.max(0, calendarViewport.clientWidth - tooltip.offsetWidth);
+    tooltip.style.left = `${Math.max(0, Math.min(activeHover.anchorX - tooltip.offsetWidth / 2, maxLeft))}px`;
+  }, [bounded, activeHover, tooltipDuration, viewport]);
+  const gridStyle = {
+    gridTemplateColumns: `repeat(${renderedWeekCount}, minmax(0, 1fr))`,
+    ...(bounded
+      ? {
+          width: `${weekCount * BOUNDED_CELL_SIZE_REM + Math.max(0, weekCount - 1) * BOUNDED_CELL_GAP_REM}rem`,
+          // Padding replaces offscreen columns while preserving full extent and
+          // the exact same week positions for cells and month labels.
+          paddingLeft: `${firstRenderedWeek * (BOUNDED_CELL_SIZE_REM + BOUNDED_CELL_GAP_REM)}rem`,
+          paddingRight: `${(weekCount - endRenderedWeek) * (BOUNDED_CELL_SIZE_REM + BOUNDED_CELL_GAP_REM)}rem`,
+        }
+      : {}),
+  };
 
   // Anchor the tooltip to the hovered cell's near edge close to the grid
   // borders so its overhang isn't clipped by the card's `overflow-hidden`;
   // center it everywhere in between.
   const tooltipAlignClass =
-    hovered === null
+    activeHover === null
       ? "-translate-x-1/2"
-      : hovered.xFraction < 0.2
+      : activeHover.xFraction < 0.2
         ? "translate-x-0"
-        : hovered.xFraction > 0.8
+        : activeHover.xFraction > 0.8
           ? "-translate-x-full"
           : "-translate-x-1/2";
+  const tooltip =
+    activeHover !== null ? (
+      <div
+        ref={tooltipRef}
+        className={`pointer-events-none absolute z-10 ${bounded ? "" : tooltipAlignClass} ${bounded && activeHover.yFraction < 2 / 7 ? "translate-y-[6px]" : "-translate-y-[calc(100%+6px)]"} whitespace-nowrap rounded-md border bg-popover px-2 py-1 text-[11px] text-popover-foreground shadow-md`}
+        style={{
+          left: bounded ? activeHover.anchorX : `${activeHover.xFraction * 100}%`,
+          top: bounded ? activeHover.anchorY : `${activeHover.yFraction * 100}%`,
+          ...(bounded
+            ? ({ maxWidth: "100%", whiteSpace: "normal", overflowWrap: "anywhere" } as const)
+            : {}),
+        }}
+        role="tooltip"
+        data-activity-tooltip-day={activeHover.dayKey}
+      >
+        <span className="font-medium">{tooltipDuration}</span>
+        <span className="text-muted-foreground"> · {formatCellDate(activeHover.dayKey)}</span>
+      </div>
+    ) : null;
 
   return (
-    <div className={className}>
-      <div className="flex w-full flex-col gap-1.5">
-        <div className="flex gap-[3px]" aria-hidden>
-          <div className="w-7 shrink-0" />
-          <div
-            className="grid flex-1 gap-[3px] text-[9px] leading-none text-muted-foreground/70"
-            style={{ gridTemplateColumns: `repeat(${WEEKS}, minmax(0, 1fr))` }}
-          >
-            {Array.from({ length: WEEKS }, (_, week) => (
-              <span key={week} className="h-[10px] overflow-visible whitespace-nowrap">
-                {monthLabelByWeek.get(week) ?? ""}
-              </span>
-            ))}
-          </div>
-        </div>
-        <div className="flex gap-[3px]">
-          <div
-            className="grid w-7 shrink-0 grid-rows-7 gap-[3px] text-[9px] leading-none text-muted-foreground/70"
-            aria-hidden
-          >
-            {WEEKDAY_LABELS.map(({ day, label }) => (
-              <span key={day} className="flex items-center">
-                {label}
-              </span>
-            ))}
-          </div>
-          <div
-            className="relative grid flex-1 gap-[3px]"
-            style={{ gridTemplateColumns: `repeat(${WEEKS}, minmax(0, 1fr))` }}
-            role="img"
-            aria-label="Daily generating time for the last few months; brighter cells mean more time."
-            onPointerLeave={() => setHovered(null)}
-          >
-            {weeks.map((column, week) => (
-              <div key={column[0]?.dayKey ?? week} className="grid grid-rows-7 gap-[3px]">
-                {column.map((cell, weekday) =>
-                  cell.inRange ? (
-                    <div
-                      key={cell.dayKey}
-                      className="aspect-square w-full rounded-[2px] ring-1 ring-inset ring-foreground/[0.06] transition-colors duration-300 hover:ring-foreground/40 motion-reduce:transition-none"
-                      style={{ backgroundColor: cellColor(intensityOf(cell.generatingMs, maxMs)) }}
-                      onPointerEnter={() =>
-                        setHovered({
-                          dayKey: cell.dayKey,
-                          generatingMs: cell.generatingMs,
-                          xFraction: (week + 0.5) / WEEKS,
-                          yFraction: (weekday + 0.5) / 7,
-                        })
-                      }
-                    />
-                  ) : (
-                    <div key={cell.dayKey} className="aspect-square w-full" />
-                  ),
-                )}
-              </div>
-            ))}
-            {hovered !== null ? (
+    <div className={bounded ? `min-w-0 max-w-full ${className ?? ""}` : className}>
+      <div
+        ref={calendarViewportRef}
+        className="relative flex w-full min-w-0 max-w-full flex-col gap-1.5"
+      >
+        <div
+          ref={scrollerRef}
+          className={bounded ? "min-w-0 max-w-full overflow-x-auto pb-1" : "w-full"}
+          data-activity-heatmap-scroll={bounded ? "true" : undefined}
+          role={virtualized ? "region" : undefined}
+          aria-label={virtualized ? "Scroll through daily activity history" : undefined}
+          tabIndex={virtualized ? 0 : undefined}
+          onScroll={
+            bounded
+              ? (event) => {
+                  setHovered(null);
+                  const scrollLeft = event.currentTarget.scrollLeft;
+                  setViewport((current) =>
+                    current?.calendarKey === calendarKey ? { ...current, scrollLeft } : current,
+                  );
+                }
+              : undefined
+          }
+        >
+          <div className={bounded ? "flex w-max flex-col gap-1.5" : "flex w-full flex-col gap-1.5"}>
+            <div className={bounded ? "flex gap-[0.1875rem]" : "flex gap-[3px]"} aria-hidden>
+              <div className="w-7 shrink-0" />
               <div
-                className={`pointer-events-none absolute z-10 ${tooltipAlignClass} -translate-y-[calc(100%+6px)] whitespace-nowrap rounded-md border bg-popover px-2 py-1 text-[11px] text-popover-foreground shadow-md`}
-                style={{
-                  left: `${hovered.xFraction * 100}%`,
-                  top: `${hovered.yFraction * 100}%`,
-                }}
+                className={
+                  bounded
+                    ? "grid shrink-0 gap-[0.1875rem] text-[0.5625rem] leading-none text-muted-foreground/70"
+                    : "grid flex-1 gap-[3px] text-[9px] leading-none text-muted-foreground/70"
+                }
+                style={gridStyle}
               >
-                <span className="font-medium">{formatCellDuration(hovered.generatingMs)}</span>
-                <span className="text-muted-foreground"> · {formatCellDate(hovered.dayKey)}</span>
+                {weeks.map((column) => (
+                  <span
+                    key={column.cells[0]?.dayKey}
+                    className={
+                      bounded
+                        ? "h-[0.625rem] overflow-visible whitespace-nowrap"
+                        : "h-[10px] overflow-visible whitespace-nowrap"
+                    }
+                  >
+                    {monthLabelByWeek.get(column.index) ?? ""}
+                  </span>
+                ))}
               </div>
-            ) : null}
+            </div>
+            <div className={bounded ? "flex gap-[0.1875rem]" : "flex gap-[3px]"}>
+              <div
+                className={
+                  bounded
+                    ? "grid w-7 shrink-0 grid-rows-7 gap-[0.1875rem] text-[0.5625rem] leading-none text-muted-foreground/70"
+                    : "grid w-7 shrink-0 grid-rows-7 gap-[3px] text-[9px] leading-none text-muted-foreground/70"
+                }
+                aria-hidden
+              >
+                {WEEKDAY_LABELS.map(({ day, label }) => (
+                  <span key={day} className="flex items-center">
+                    {label}
+                  </span>
+                ))}
+              </div>
+              <div
+                className={
+                  bounded
+                    ? "relative grid shrink-0 gap-[0.1875rem]"
+                    : "relative grid flex-1 gap-[3px]"
+                }
+                style={gridStyle}
+                role="img"
+                data-activity-range-day-count={Math.max(0, endDay - rangeStart + 1)}
+                aria-label={
+                  bounds
+                    ? `Daily generating time from ${bounds.startDay} through ${bounds.endDay}; brighter cells mean more time.`
+                    : "Daily generating time for the last few months; brighter cells mean more time."
+                }
+                onPointerLeave={() => setHovered(null)}
+              >
+                {weeks.map((column) => (
+                  <div
+                    key={column.cells[0]?.dayKey}
+                    className={
+                      bounded ? "grid grid-rows-7 gap-[0.1875rem]" : "grid grid-rows-7 gap-[3px]"
+                    }
+                  >
+                    {column.cells.map((cell, weekday) =>
+                      cell.inRange ? (
+                        <div
+                          key={cell.dayKey}
+                          data-activity-day={cell.dayKey}
+                          data-activity-in-range="true"
+                          className="aspect-square w-full rounded-[2px] ring-1 ring-inset ring-foreground/[0.06] transition-colors duration-300 hover:ring-foreground/40 motion-reduce:transition-none"
+                          style={{
+                            backgroundColor: cellColor(intensityOf(cell.generatingMs, maxMs)),
+                          }}
+                          onPointerEnter={(event) => {
+                            const viewport = calendarViewportRef.current?.getBoundingClientRect();
+                            const cellBox = event.currentTarget.getBoundingClientRect();
+                            const anchorX =
+                              cellBox.left + cellBox.width / 2 - (viewport?.left ?? 0);
+                            setHovered({
+                              dayKey: cell.dayKey,
+                              calendarKey,
+                              anchorX,
+                              anchorY: cellBox.top + cellBox.height / 2 - (viewport?.top ?? 0),
+                              xFraction:
+                                bounded && viewport
+                                  ? anchorX / viewport.width
+                                  : (column.index + 0.5) / weekCount,
+                              yFraction: (weekday + 0.5) / 7,
+                            });
+                          }}
+                        />
+                      ) : (
+                        <div
+                          key={cell.dayKey}
+                          data-activity-day={cell.dayKey}
+                          data-activity-in-range="false"
+                          className="aspect-square w-full"
+                          aria-hidden
+                        />
+                      ),
+                    )}
+                  </div>
+                ))}
+                {!bounded ? tooltip : null}
+              </div>
+            </div>
           </div>
         </div>
+        {bounded ? tooltip : null}
         <div className="flex items-center justify-end gap-1.5 pt-0.5 text-[10px] leading-none text-muted-foreground/70">
           <span>Less</span>
           {[0, 0.25, 0.5, 0.75, 1].map((intensity) => (
