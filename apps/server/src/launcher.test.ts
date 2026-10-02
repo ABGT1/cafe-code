@@ -17,13 +17,42 @@ describe("launcher", () => {
     });
   });
 
-  it("recognizes npm bin symlinks as direct launcher execution", () => {
+  it("recognizes direct launcher execution without requiring symlink privileges", () => {
+    const launcherPath = fileURLToPath(new URL("./launcher.ts", import.meta.url));
+    const launcherUrl = pathToFileURL(realpathSync(launcherPath)).href;
+
+    assert.equal(isCliEntrypoint(launcherPath, launcherUrl), true);
+    assert.equal(isCliEntrypoint(undefined, launcherUrl), false);
+    assert.equal(
+      isCliEntrypoint(fileURLToPath(new URL("../package.json", import.meta.url)), launcherUrl),
+      false,
+    );
+  });
+
+  it("recognizes npm bin symlinks as direct launcher execution", (context) => {
     const launcherPath = fileURLToPath(new URL("./launcher.ts", import.meta.url));
     const testDir = mkdtempSync(join(tmpdir(), "cafe-code-launcher-"));
     const symlinkPath = join(testDir, "cafe-code");
 
     try {
-      symlinkSync(launcherPath, symlinkPath);
+      try {
+        symlinkSync(launcherPath, symlinkPath);
+      } catch (error) {
+        // Windows file symlinks require Developer Mode or administrator
+        // privileges. Skip only this fixture-dependent assertion when the OS
+        // denies that privilege; direct-entrypoint coverage above still runs.
+        // Other filesystem errors and every POSIX failure remain actionable.
+        if (
+          process.platform === "win32" &&
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "EPERM"
+        ) {
+          context.skip("Windows does not permit this file-symlink fixture.");
+          return;
+        }
+        throw error;
+      }
       assert.equal(
         isCliEntrypoint(symlinkPath, pathToFileURL(realpathSync(launcherPath)).href),
         true,

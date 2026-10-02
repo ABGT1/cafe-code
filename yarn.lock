@@ -642,6 +642,7 @@ __metadata:
     katex: "npm:^0.17.0"
     lexical: "npm:^0.41.0"
     lucide-react: "npm:^0.564.0"
+    micromark-util-decode-string: "npm:^2.0.0"
     micromark-util-types: "npm:^2.0.2"
     msw: "npm:2.12.11"
     playwright: "npm:^1.58.2"

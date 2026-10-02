@@ -60,7 +60,159 @@ function makeMockDetachedHandle(onUnref: () => void = () => undefined) {
   });
 }
 
+function makeWindowsEditorInstallation(version?: string) {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const temporaryRoot = yield* fs.makeTempDirectoryScoped({ prefix: "cafe-editor-launch-" });
+    const installation = path.join(
+      yield* fs.realPath(temporaryRoot),
+      "Editor & %literal%! (fixture)",
+    );
+    const bin = path.join(installation, "bin");
+    const executable = path.join(installation, "Code.exe");
+    const cli = path.join(
+      installation,
+      ...(version ? [version] : []),
+      "resources",
+      "app",
+      "out",
+      "cli.js",
+    );
+    const shim = path.join(bin, "code.cmd");
+    yield* fs.makeDirectory(bin, { recursive: true });
+    yield* fs.makeDirectory(path.dirname(cli), { recursive: true });
+    yield* fs.writeFileString(executable, "synthetic native executable metadata");
+    yield* fs.writeFileString(cli, "synthetic editor CLI metadata");
+    yield* fs.writeFileString(
+      shim,
+      [
+        "@echo off",
+        "setlocal",
+        "set VSCODE_DEV=",
+        "set ELECTRON_RUN_AS_NODE=1",
+        `"%~dp0..\\Code.exe" "%~dp0..\\${version ? `${version}\\` : ""}resources\\app\\out\\cli.js" %*`,
+        "IF %ERRORLEVEL% NEQ 0 EXIT /b %ERRORLEVEL%",
+        "endlocal",
+        "",
+      ].join("\r\n"),
+    );
+    return { bin, executable, cli, shim, env: { PATH: bin, PATHEXT: ".EXE;.CMD" } };
+  });
+}
+
 it.layer(NodeServices.layer)("resolveEditorLaunch", (it) => {
+  it.effect(
+    "launches admitted Windows editor shims as native executable plus structured CLI args",
+    () =>
+      Effect.gen(function* () {
+        const files = yield* makeWindowsEditorInstallation(
+          "3105ef6d4409c52eeb18800eea5b5d40ac2c539a",
+        );
+        const target = String.raw`C:\workspace\review & %literal%! (final).md:42:7`;
+        const launch = yield* resolveEditorLaunch(
+          { cwd: target, editor: "vscode" },
+          "win32",
+          files.env,
+        );
+        assert.deepEqual(launch, {
+          command: files.executable,
+          args: [files.cli, "--goto", target],
+          windowsNodeMode: true,
+        });
+        assert.deepEqual(resolveAvailableEditors("win32", files.env), ["vscode"]);
+
+        const environment = { ...files.env, VSCODE_DEV: "1", Electron_Run_As_Node: "0" };
+        const processLaunch = resolveEditorProcessLaunch(launch, "win32", environment);
+        assert.equal(processLaunch.command, files.executable);
+        assert.deepEqual(processLaunch.args, [files.cli, "--goto", target]);
+        assert.deepEqual(processLaunch.options, {
+          detached: true,
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+          shell: false,
+          env: { ...files.env, ELECTRON_RUN_AS_NODE: "1" },
+          extendEnv: false,
+        });
+        assert.equal(environment.VSCODE_DEV, "1");
+      }),
+  );
+
+  it.effect(
+    "omits unsupported Windows shims and rejects explicit selection with a fixed diagnostic",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const files = yield* makeWindowsEditorInstallation();
+        yield* fs.writeFileString(files.shim, "@echo off\r\nPRIVATE FIXTURE CONTENT %*\r\n");
+        assert.deepEqual(resolveAvailableEditors("win32", files.env), []);
+        const result = yield* resolveEditorLaunch(
+          { cwd: String.raw`C:\workspace\file.md`, editor: "vscode" },
+          "win32",
+          files.env,
+        ).pipe(Effect.result);
+        assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") {
+          assert.equal(
+            result.failure.message,
+            "Installed editor command cannot be launched safely on Windows.",
+          );
+          assert.notInclude(result.failure.message, "PRIVATE FIXTURE CONTENT");
+          assert.notInclude(result.failure.message, files.shim);
+        }
+      }),
+  );
+
+  it.effect(
+    "keeps native Windows editor executables on direct argv and inherited environment",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const files = yield* makeWindowsEditorInstallation();
+        const nativeCommand = path.join(files.bin, "code.EXE");
+        yield* fs.writeFileString(nativeCommand, "synthetic native executable metadata");
+        const target = String.raw`C:\workspace\file.md:42`;
+        const launch = yield* resolveEditorLaunch(
+          { cwd: target, editor: "vscode" },
+          "win32",
+          files.env,
+        );
+        assert.deepEqual(launch, { command: nativeCommand, args: ["--goto", target] });
+        assert.deepEqual(resolveEditorProcessLaunch(launch, "win32", files.env).options, {
+          detached: true,
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+          shell: false,
+        });
+      }),
+  );
+
+  it.effect("does not replace an unsupported Windows editor command with another alias", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const files = yield* makeWindowsEditorInstallation();
+      yield* fs.writeFileString(path.join(files.bin, "zed.cmd"), "@echo off\r\nunknown %*\r\n");
+      yield* fs.writeFileString(path.join(files.bin, "zeditor.EXE"), "synthetic native alias");
+      assert.notInclude(resolveAvailableEditors("win32", files.env), "zed");
+      const result = yield* resolveEditorLaunch(
+        { cwd: String.raw`C:\workspace\file.md`, editor: "zed" },
+        "win32",
+        files.env,
+      ).pipe(Effect.result);
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
+        assert.equal(
+          result.failure.message,
+          "Installed editor command cannot be launched safely on Windows.",
+        );
+      }
+    }),
+  );
+
   it.effect("returns commands for command-based editors", () =>
     Effect.gen(function* () {
       const antigravityLaunch = yield* resolveEditorLaunch(
@@ -911,22 +1063,25 @@ it.layer(NodeServices.layer)("resolveAvailableEditors", (it) => {
       const path = yield* Path.Path;
       const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-editors-" });
 
-      yield* fs.writeFileString(path.join(dir, "trae.CMD"), "@echo off\r\n");
-      yield* fs.writeFileString(path.join(dir, "kiro.CMD"), "@echo off\r\n");
-      yield* fs.writeFileString(path.join(dir, "code-insiders.CMD"), "@echo off\r\n");
-      yield* fs.writeFileString(path.join(dir, "codium.CMD"), "@echo off\r\n");
-      yield* fs.writeFileString(path.join(dir, "aqua.CMD"), "@echo off\r\n");
-      yield* fs.writeFileString(path.join(dir, "clion.CMD"), "@echo off\r\n");
-      yield* fs.writeFileString(path.join(dir, "datagrip.CMD"), "@echo off\r\n");
-      yield* fs.writeFileString(path.join(dir, "dataspell.CMD"), "@echo off\r\n");
-      yield* fs.writeFileString(path.join(dir, "goland.CMD"), "@echo off\r\n");
-      yield* fs.writeFileString(path.join(dir, "phpstorm.CMD"), "@echo off\r\n");
-      yield* fs.writeFileString(path.join(dir, "pycharm.CMD"), "@echo off\r\n");
-      yield* fs.writeFileString(path.join(dir, "rider.CMD"), "@echo off\r\n");
-      yield* fs.writeFileString(path.join(dir, "rubymine.CMD"), "@echo off\r\n");
-      yield* fs.writeFileString(path.join(dir, "rustrover.CMD"), "@echo off\r\n");
-      yield* fs.writeFileString(path.join(dir, "webstorm.CMD"), "@echo off\r\n");
-      yield* fs.writeFileString(path.join(dir, "explorer.CMD"), "MZ");
+      // Command availability alone is insufficient for a Windows batch shim:
+      // this generic catalog fixture models native executable metadata. The
+      // recognized and unsupported shim cases below cover their own admission.
+      yield* fs.writeFileString(path.join(dir, "trae.EXE"), "MZ");
+      yield* fs.writeFileString(path.join(dir, "kiro.EXE"), "MZ");
+      yield* fs.writeFileString(path.join(dir, "code-insiders.EXE"), "MZ");
+      yield* fs.writeFileString(path.join(dir, "codium.EXE"), "MZ");
+      yield* fs.writeFileString(path.join(dir, "aqua.EXE"), "MZ");
+      yield* fs.writeFileString(path.join(dir, "clion.EXE"), "MZ");
+      yield* fs.writeFileString(path.join(dir, "datagrip.EXE"), "MZ");
+      yield* fs.writeFileString(path.join(dir, "dataspell.EXE"), "MZ");
+      yield* fs.writeFileString(path.join(dir, "goland.EXE"), "MZ");
+      yield* fs.writeFileString(path.join(dir, "phpstorm.EXE"), "MZ");
+      yield* fs.writeFileString(path.join(dir, "pycharm.EXE"), "MZ");
+      yield* fs.writeFileString(path.join(dir, "rider.EXE"), "MZ");
+      yield* fs.writeFileString(path.join(dir, "rubymine.EXE"), "MZ");
+      yield* fs.writeFileString(path.join(dir, "rustrover.EXE"), "MZ");
+      yield* fs.writeFileString(path.join(dir, "webstorm.EXE"), "MZ");
+      yield* fs.writeFileString(path.join(dir, "explorer.EXE"), "MZ");
       const editors = resolveAvailableEditors("win32", {
         PATH: dir,
         PATHEXT: ".COM;.EXE;.BAT;.CMD",

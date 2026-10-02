@@ -57,7 +57,15 @@ export default defineConfig({
     tailwindcss(),
   ],
   optimizeDeps: {
-    include: ["@pierre/diffs", "@noble/hashes/sha2.js", "effect/Array", "effect/Order"],
+    include: [
+      "@pierre/diffs",
+      "@noble/hashes/sha2.js",
+      "effect/Array",
+      "effect/Order",
+      // This parser-owned decoder is imported by math/link normalization.
+      // Prebundle it so cold browser tests do not reload during assertions.
+      "micromark-util-decode-string",
+    ],
   },
   define: {
     // In dev mode, tell the renderer where the WebSocket server lives

@@ -35,12 +35,13 @@ import {
 } from "@tanstack/react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-import { __resetLocalApiForTests } from "../../localApi";
+import { __resetLocalApiForTests, ensureLocalApi } from "../../localApi";
 import { AppAtomRegistryProvider, resetAppAtomRegistryForTests } from "../../rpc/atomRegistry";
 import { resetServerStateForTests, setServerConfigSnapshot } from "../../rpc/serverState";
 import { useUiStateStore } from "../../uiStateStore";
 import { ConnectionsSettings } from "./ConnectionsSettings";
 import { DiagnosticsSettingsPanel } from "./DiagnosticsSettings";
+import { KeybindingsSettingsPanel } from "./KeybindingsSettings";
 import {
   AppearanceSettingsPanel,
   ChatSettingsPanel,
@@ -649,6 +650,27 @@ function installClientSettingsNativeApi(desktopBridge: DesktopBridge) {
     },
   } as unknown as LocalApi;
   return { updateClientSettings };
+}
+
+function installFileSettingsNativeApi(config: ServerConfig) {
+  const getConfig = vi.fn<LocalApi["server"]["getConfig"]>().mockResolvedValue(config);
+  const openSystemPromptFile = vi
+    .fn<LocalApi["server"]["openSystemPromptFile"]>()
+    .mockResolvedValue({ path: config.systemPromptPath });
+  const openPath = vi.fn<LocalApi["shell"]["openPath"]>().mockResolvedValue(undefined);
+  const openInEditor = vi.fn<LocalApi["shell"]["openInEditor"]>().mockResolvedValue(undefined);
+  const confirm = vi.fn<LocalApi["dialogs"]["confirm"]>().mockResolvedValue(true);
+  window.nativeApi = {
+    dialogs: { confirm },
+    persistence: {
+      getClientSettings: vi.fn().mockResolvedValue(null),
+      setClientSettings: vi.fn().mockResolvedValue(undefined),
+    },
+    server: { getConfig, openSystemPromptFile },
+    shell: { openPath, openInEditor },
+  } as unknown as LocalApi;
+  setServerConfigSnapshot(config);
+  return { getConfig, openSystemPromptFile, openPath, openInEditor, confirm };
 }
 
 describe("settings panels", () => {
@@ -1658,31 +1680,15 @@ describe("settings panels", () => {
     expect(openInEditor).toHaveBeenCalledWith("/repo/project/.t3/logs", "cursor");
   });
 
-  it("opens the file-backed system prompt from Chat settings", async () => {
-    const openSystemPromptFile = vi
-      .fn<LocalApi["server"]["openSystemPromptFile"]>()
-      .mockResolvedValue({
-        path: "/repo/project/.t3code-system-prompt.md",
-      });
-    const getConfig = vi.fn<LocalApi["server"]["getConfig"]>().mockResolvedValue({
+  it("opens the file-backed system prompt with the configured editor from Chat settings", async () => {
+    const config: ServerConfig = {
       ...createBaseServerConfig(),
-      availableEditors: ["cursor"],
-    });
-    const openInEditor = vi.fn<LocalApi["shell"]["openInEditor"]>().mockResolvedValue(undefined);
-    window.nativeApi = {
-      persistence: {
-        getClientSettings: vi.fn().mockResolvedValue(null),
-        setClientSettings: vi.fn().mockResolvedValue(undefined),
-      },
-      server: {
-        getConfig,
-        openSystemPromptFile,
-      },
-      shell: {
-        openInEditor,
-      },
-    } as unknown as LocalApi;
-    setServerConfigSnapshot(createBaseServerConfig());
+      availableEditors: ["vscode", "cursor"],
+      clientSettings: { ...DEFAULT_CLIENT_SETTINGS, defaultEditor: "cursor" },
+    };
+    const { openSystemPromptFile, openPath, openInEditor, confirm } =
+      installFileSettingsNativeApi(config);
+    localStorage.setItem("cafe-code:last-editor", JSON.stringify("vscode"));
 
     mounted = await renderWithTestRouter(
       <AppAtomRegistryProvider>
@@ -1694,8 +1700,179 @@ describe("settings panels", () => {
 
     await vi.waitFor(() => {
       expect(openSystemPromptFile).toHaveBeenCalledTimes(1);
-      expect(openInEditor).toHaveBeenCalledWith("/repo/project/.t3code-system-prompt.md", "cursor");
+      expect(openInEditor).toHaveBeenCalledExactlyOnceWith(config.systemPromptPath, "cursor");
+      expect(openPath).not.toHaveBeenCalled();
+      expect(confirm).not.toHaveBeenCalled();
     });
+  });
+
+  it.each([
+    "C:\\repo\\project\\.cafe-code-system-prompt.md",
+    "/Users/example/project/.cafe-code-system-prompt.md",
+    "/home/example/project/.cafe-code-system-prompt.md",
+  ])("opens the file-backed system prompt with its system association for %s", async (path) => {
+    const { openSystemPromptFile, openPath, openInEditor, confirm } = installFileSettingsNativeApi({
+      ...createBaseServerConfig(),
+      availableEditors: [],
+      systemPromptPath: path,
+      clientSettings: { ...DEFAULT_CLIENT_SETTINGS, defaultEditor: "system-default" },
+    });
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <ChatSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await page.getByRole("button", { name: "Open file" }).click();
+
+    await vi.waitFor(() => {
+      expect(openSystemPromptFile).toHaveBeenCalledTimes(1);
+      expect(openPath).toHaveBeenCalledExactlyOnceWith(path);
+      expect(openInEditor).not.toHaveBeenCalled();
+      expect(confirm).not.toHaveBeenCalled();
+    });
+  });
+
+  it.each(["system-default", "vscode"] as const)(
+    "opens keybindings.json with the configured %s selection",
+    async (defaultEditor) => {
+      const config: ServerConfig = {
+        ...createBaseServerConfig(),
+        availableEditors: ["cursor", "vscode"],
+        clientSettings: { ...DEFAULT_CLIENT_SETTINGS, defaultEditor },
+      };
+      const { openPath, openInEditor, confirm } = installFileSettingsNativeApi(config);
+      localStorage.setItem("cafe-code:last-editor", JSON.stringify("cursor"));
+      mounted = await renderWithTestRouter(
+        <AppAtomRegistryProvider>
+          <KeybindingsSettingsPanel />
+        </AppAtomRegistryProvider>,
+      );
+
+      await page.getByRole("button", { name: "Open keybindings.json", exact: true }).click();
+
+      await vi.waitFor(() => {
+        expect(confirm).not.toHaveBeenCalled();
+        if (defaultEditor === "system-default") {
+          expect(openPath).toHaveBeenCalledExactlyOnceWith(config.keybindingsConfigPath);
+          expect(openInEditor).not.toHaveBeenCalled();
+        } else {
+          expect(openInEditor).toHaveBeenCalledExactlyOnceWith(
+            config.keybindingsConfigPath,
+            "vscode",
+          );
+          expect(openPath).not.toHaveBeenCalled();
+        }
+      });
+    },
+  );
+
+  it.each([
+    { panel: "system prompt", path: "C:\\repo\\script.cmd", button: "Open file" },
+    { panel: "keybindings", path: "/repo/script.sh", button: "Open keybindings.json" },
+  ] as const)(
+    "does not bypass declined system-association consent from the $panel settings action",
+    async ({ panel, path, button }) => {
+      const { openPath, openInEditor, confirm } = installFileSettingsNativeApi({
+        ...createBaseServerConfig(),
+        systemPromptPath: path,
+        keybindingsConfigPath: path,
+        clientSettings: { ...DEFAULT_CLIENT_SETTINGS, defaultEditor: "system-default" },
+      });
+      confirm.mockResolvedValue(false);
+      mounted = await renderWithTestRouter(
+        <AppAtomRegistryProvider>
+          {panel === "system prompt" ? <ChatSettingsPanel /> : <KeybindingsSettingsPanel />}
+        </AppAtomRegistryProvider>,
+      );
+
+      const openButton = page.getByRole("button", { name: button, exact: true });
+      await openButton.click();
+
+      await vi.waitFor(() => {
+        expect(confirm).toHaveBeenCalledExactlyOnceWith(
+          `The system default may run code or launch an application for this path:\n\n${path}\n\nOpen with the system default?`,
+        );
+      });
+      await expect.element(openButton).toBeEnabled();
+      expect(openPath).not.toHaveBeenCalled();
+      expect(openInEditor).not.toHaveBeenCalled();
+    },
+  );
+
+  it("opens a potentially runnable system-prompt association only after explicit consent", async () => {
+    const path = "/Users/example/review.command";
+    const { openPath, openInEditor, confirm } = installFileSettingsNativeApi({
+      ...createBaseServerConfig(),
+      systemPromptPath: path,
+      clientSettings: { ...DEFAULT_CLIENT_SETTINGS, defaultEditor: "system-default" },
+    });
+    mounted = await renderWithTestRouter(
+      <AppAtomRegistryProvider>
+        <ChatSettingsPanel />
+      </AppAtomRegistryProvider>,
+    );
+
+    await page.getByRole("button", { name: "Open file", exact: true }).click();
+
+    await vi.waitFor(() => {
+      expect(confirm).toHaveBeenCalledTimes(1);
+      expect(openPath).toHaveBeenCalledExactlyOnceWith(path);
+    });
+    expect(openInEditor).not.toHaveBeenCalled();
+  });
+
+  it("copies the system prompt path when the local shell capability disappears", async () => {
+    const config = createBaseServerConfig();
+    const { getConfig, openSystemPromptFile, openPath, openInEditor } =
+      installFileSettingsNativeApi(config);
+    // A cached backend API can outlive the native bridge. It still supplies the
+    // prompt path, but cannot grant permission to open applications on this host.
+    ensureLocalApi();
+    Reflect.deleteProperty(window, "nativeApi");
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    try {
+      mounted = await renderWithTestRouter(
+        <AppAtomRegistryProvider>
+          <ChatSettingsPanel />
+        </AppAtomRegistryProvider>,
+      );
+
+      await page.getByRole("button", { name: "Copy path", exact: true }).click();
+
+      await vi.waitFor(() => {
+        expect(openSystemPromptFile).toHaveBeenCalledTimes(1);
+        expect(writeText).toHaveBeenCalledExactlyOnceWith(config.systemPromptPath);
+      });
+      expect(getConfig).not.toHaveBeenCalled();
+      expect(openPath).not.toHaveBeenCalled();
+      expect(openInEditor).not.toHaveBeenCalled();
+    } finally {
+      writeText.mockRestore();
+    }
+  });
+
+  it("copies keybindings.json in a browser without a local shell bridge", async () => {
+    const config = createBaseServerConfig();
+    setServerConfigSnapshot(config);
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue(undefined);
+    try {
+      mounted = await renderWithTestRouter(
+        <AppAtomRegistryProvider>
+          <KeybindingsSettingsPanel />
+        </AppAtomRegistryProvider>,
+      );
+
+      await page.getByRole("button", { name: "Copy keybindings.json path", exact: true }).click();
+
+      await vi.waitFor(() => {
+        expect(writeText).toHaveBeenCalledExactlyOnceWith(config.keybindingsConfigPath);
+      });
+      expect(window.nativeApi).toBeUndefined();
+      expect(window.desktopBridge).toBeUndefined();
+    } finally {
+      writeText.mockRestore();
+    }
   });
 
   it("runs one-click provider updates from the provider card", async () => {

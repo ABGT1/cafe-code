@@ -185,6 +185,293 @@ describe("ChatMarkdown", () => {
     }
   });
 
+  it("classifies angle-bracketed file links with spaces and parentheses", async () => {
+    showContextMenuMock.mockResolvedValueOnce("reveal");
+    const filePath = "C:/repo/review packets/assurance (final).md";
+    installDesktopCapabilityStub();
+    const screen = await render(
+      <ChatMarkdown
+        text="[assurance prompts](<C:/repo/review packets/assurance (final).md>)"
+        cwd="C:/repo"
+      />,
+    );
+
+    try {
+      const link = page.getByRole("link", { name: "assurance (final).md" });
+      await expect.element(link).toBeInTheDocument();
+
+      const linkElement = document.querySelector<HTMLAnchorElement>(".chat-markdown-file-link");
+      expect(linkElement).not.toBeNull();
+      linkElement!.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+          clientX: 21,
+          clientY: 43,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(showContextMenuMock).toHaveBeenCalledWith(
+          expect.arrayContaining([
+            expect.objectContaining({ id: "open", label: "Open file" }),
+            expect.objectContaining({
+              id: "reveal",
+              label: expect.stringMatching(/^Open in (Finder|Explorer|Files)$/),
+            }),
+          ]),
+          { x: 21, y: 43 },
+        );
+      });
+      await vi.waitFor(() => {
+        expect(revealPathMock).toHaveBeenCalledWith(filePath);
+      });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("classifies relative file links containing spaces and parentheses", async () => {
+    const filePath = "C:/repo/project/.cafe-code-link-smoke/folder with spaces/review (final).md";
+    installDesktopCapabilityStub();
+    const screen = await render(
+      <ChatMarkdown
+        text="[Relative path with spaces and parentheses](<.cafe-code-link-smoke/folder with spaces/review (final).md>)"
+        cwd="C:/repo/project"
+      />,
+    );
+
+    try {
+      const link = page.getByRole("link", { name: "review (final).md" });
+      await expect.element(link).toHaveAttribute("href", filePath);
+      await link.click();
+      await vi.waitFor(() => {
+        expect(openInPreferredEditorMock).toHaveBeenCalledWith(expect.anything(), filePath);
+      });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("preserves windows backslash separators that markdown would treat as escapes", async () => {
+    const filePath = "C:/repo/Example Project/.docs/runbooks/review-notes.md";
+    installDesktopCapabilityStub();
+    const screen = await render(
+      <ChatMarkdown
+        text={"[assurance prompts](<C:\\repo\\Example Project\\.docs\\runbooks\\review-notes.md>)"}
+        cwd="C:/repo/Example Project"
+      />,
+    );
+
+    try {
+      const link = page.getByRole("link", {
+        name: "review-notes.md",
+      });
+      await expect.element(link).toBeInTheDocument();
+      await expect.element(link).toHaveAttribute("href", filePath);
+      await link.click();
+
+      await vi.waitFor(() => {
+        expect(openInPreferredEditorMock).toHaveBeenCalledWith(expect.anything(), filePath);
+      });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it.each(["C:/repo", "/Users/example/repo", "/home/example/repo"])(
+    "uses the parsed destination for balanced parentheses under %s",
+    async (cwd) => {
+      const filePath = `${cwd}/review(final).md`;
+      installDesktopCapabilityStub();
+      const screen = await render(<ChatMarkdown text={`[Review](${filePath})`} cwd={cwd} />);
+      try {
+        const link = page.getByRole("link", { name: "review(final).md" });
+        await expect.element(link).toHaveAttribute("href", filePath);
+        await link.click();
+        await vi.waitFor(() => {
+          expect(openInPreferredEditorMock).toHaveBeenCalledWith(expect.anything(), filePath);
+        });
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
+
+  it("uses the parsed destination for reference-style file links", async () => {
+    installDesktopCapabilityStub();
+    const screen = await render(
+      <ChatMarkdown
+        text={"[Review][notes]\n\n[notes]: </home/example/repo/review (final).md>"}
+        cwd="/home/example/repo"
+      />,
+    );
+    try {
+      const link = page.getByRole("link", { name: "review (final).md" });
+      await expect.element(link).toHaveAttribute("href", "/home/example/repo/review (final).md");
+      await link.click();
+      await vi.waitFor(() => {
+        expect(openInPreferredEditorMock).toHaveBeenCalledWith(
+          expect.anything(),
+          "/home/example/repo/review (final).md",
+        );
+      });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("decodes Markdown punctuation escapes in POSIX destinations", async () => {
+    installDesktopCapabilityStub();
+    const screen = await render(
+      <ChatMarkdown
+        text={String.raw`[Review](/home/example/repo/review\_final.md)`}
+        cwd="/home/example/repo"
+      />,
+    );
+    try {
+      const link = page.getByRole("link", { name: "review_final.md" });
+      await expect.element(link).toHaveAttribute("href", "/home/example/repo/review_final.md");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it.each([
+    [
+      "/Users/example/repo",
+      String.raw`[Review](/Users/example/repo/review\(final\).md#L2C7)`,
+      "/Users/example/repo/review(final).md:2:7",
+    ],
+    [
+      "/home/example/repo",
+      String.raw`[Review](src/review\(final\).md#L2C7)`,
+      "/home/example/repo/src/review(final).md:2:7",
+    ],
+    [
+      "C:/repo",
+      String.raw`[Review](src/review\(final\).md#L2C7)`,
+      "C:/repo/src/review(final).md:2:7",
+    ],
+    [
+      "C:/repo",
+      "[Review][notes]\n\n" + String.raw`[notes]: <src/review\(final\).md#L2C7>`,
+      "C:/repo/src/review(final).md:2:7",
+    ],
+    ["C:/repo", String.raw`[Review](review\(final\).md#L2C7)`, "C:/repo/review(final).md:2:7"],
+    [
+      "C:/repo",
+      String.raw`[Review](<C:\repo\.docs\review(final).md#L2C7>)`,
+      "C:/repo/.docs/review(final).md:2:7",
+    ],
+    [
+      "C:/repo",
+      "[Review][notes]\n\n" + String.raw`[notes]: <C:\repo\.docs\review(final).md#L2C7>`,
+      "C:/repo/.docs/review(final).md:2:7",
+    ],
+    [
+      "C:/repo",
+      "[Review][notes]\n\n" + String.raw`[notes]: <.\.docs\review(final).md#L2C7>`,
+      "C:/repo/./.docs/review(final).md:2:7",
+    ],
+    [
+      String.raw`\\server\share\repo`,
+      String.raw`[Review](<\\server\share\repo\.docs\review(final).md#L2C7>)`,
+      String.raw`\\server\share\repo\.docs\review(final).md:2:7`,
+    ],
+    [
+      String.raw`\\server\share\repo`,
+      "[Review][notes]\n\n" +
+        String.raw`[notes]: <\\server\share\repo\.docs\review(final).md#L2C7>`,
+      String.raw`\\server\share\repo\.docs\review(final).md:2:7`,
+    ],
+    [
+      String.raw`\\server\share\repo`,
+      "[Review](file://server/share/repo/.docs/review(final).md#L2C7)",
+      String.raw`\\server\share\repo\.docs\review(final).md:2:7`,
+    ],
+  ])(
+    "preserves exact file destinations and positions under %s: %s",
+    async (cwd, text, filePath) => {
+      installDesktopCapabilityStub();
+      const screen = await render(
+        <ChatMarkdown text={`${text}\n\nCompute \\(x + 1\\).`} cwd={cwd} />,
+      );
+      try {
+        const link = page.getByRole("link", { name: "review(final).md · L2:C7" });
+        await expect.element(link).toHaveAttribute("href", filePath);
+        await expect.element(link).toHaveAttribute("data-open-policy", "direct");
+        expect(document.querySelectorAll(".katex").length).toBe(1);
+        expect(document.querySelector(".katex-error")).toBeNull();
+        await link.click();
+        await vi.waitFor(() => {
+          expect(openInPreferredEditorMock).toHaveBeenCalledWith(expect.anything(), filePath);
+        });
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
+
+  it("uses parsed destinations for reference-link basename disambiguation", async () => {
+    const screen = await render(
+      <ChatMarkdown
+        text={
+          "[First][a] and [Second][b]\n\n[a]: </home/example/repo/first/review(final).md>\n[b]: </home/example/repo/second/review(final).md>"
+        }
+        cwd="/home/example/repo"
+      />,
+    );
+    try {
+      await expect
+        .element(page.getByRole("link", { name: "review(final).md · repo/first" }))
+        .toBeInTheDocument();
+      await expect
+        .element(page.getByRole("link", { name: "review(final).md · repo/second" }))
+        .toBeInTheDocument();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("renders link-shaped text identifiers inside explicit math without KaTeX failures", async () => {
+    const screen = await render(
+      <ChatMarkdown
+        text={String.raw`The identifier below reads $\texttt{[f](a_b)}$ in this formula. Also $\texttt{[f](a_b.md)}$.`}
+        cwd="C:/repo"
+      />,
+    );
+    try {
+      expect(document.querySelectorAll(".katex")).toHaveLength(2);
+      expect(document.querySelector(".katex-error")).toBeNull();
+      expect(document.querySelector(".chat-markdown-file-link")).toBeNull();
+      expect(openInPreferredEditorMock).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it.each([
+    String.raw`[Review](<C:\repo\.docs\review &amp; notes%20(final).md>)`,
+    "[Review][notes]\n\n" + String.raw`[notes]: <C:\repo\.docs\review &amp; notes%20(final).md>`,
+  ])(
+    "retains Windows separators alongside parser-decoded entities and percent octets: %s",
+    async (text) => {
+      installDesktopCapabilityStub();
+      const screen = await render(<ChatMarkdown text={text} cwd="C:/repo" />);
+      try {
+        const filePath = "C:/repo/.docs/review & notes (final).md";
+        const link = page.getByRole("link", { name: "review & notes (final).md" });
+        await expect.element(link).toHaveAttribute("href", filePath);
+        await link.click();
+        await vi.waitFor(() =>
+          expect(openInPreferredEditorMock).toHaveBeenCalledWith(expect.anything(), filePath),
+        );
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
   it("disambiguates duplicate file basenames inline", async () => {
     const firstPath = "/Users/yashsingh/p/t3code/apps/web/src/components/chat/MessagesTimeline.tsx";
     const secondPath = "/Users/yashsingh/p/t3code/apps/web/src/components/MessagesTimeline.tsx";
@@ -217,6 +504,42 @@ describe("ChatMarkdown", () => {
       await expect.element(link).toBeInTheDocument();
       await expect.element(link).toHaveAttribute("href", "https://openai.com/docs");
       await expect.element(link).toHaveAttribute("target", "_blank");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps document fragments inside the current view", async () => {
+    const screen = await render(
+      <ChatMarkdown text="[Smoke section](#smoke-test-section)" cwd="/repo/project" />,
+    );
+
+    try {
+      const link = page.getByRole("link", { name: "Smoke section" });
+      await expect.element(link).toHaveAttribute("href", "#smoke-test-section");
+      await expect.element(link).not.toHaveAttribute("target");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it.each([
+    "[Unsafe](javascript:alert(1))",
+    String.raw`[Unsafe](java\script:alert(1))`,
+    String.raw`[Unsafe](javascript:alert(1) "fake ](C:\repo\safe.md)")`,
+    String.raw`[Unsafe](jav&#x61;script:alert(1) "fake ](C:\repo\safe.md)")`,
+    "[Unsafe](data:text/html,alert(1))",
+    "[Unsafe][notes]\n\n[notes]: javascript:alert(1)",
+  ])("renders sanitized unsafe link destinations as inert text: %s", async (text) => {
+    const screen = await render(<ChatMarkdown text={text} cwd="/repo/project" />);
+
+    try {
+      await expect.element(page.getByText("Unsafe", { exact: true })).toBeInTheDocument();
+      expect(document.querySelector('a[href*="javascript"]')).toBeNull();
+      expect(document.querySelector('a[href=""]')).toBeNull();
+      expect(document.querySelector(".chat-markdown-file-link")).toBeNull();
+      expect(openInPreferredEditorMock).not.toHaveBeenCalled();
+      expect(revealPathMock).not.toHaveBeenCalled();
     } finally {
       await screen.unmount();
     }
@@ -492,6 +815,60 @@ describe("ChatMarkdown", () => {
       await screen.unmount();
     }
   });
+
+  it.each([
+    ["/Users/example/repo", "/Users/example/repo/../outside.md", null],
+    ["/home/example/repo", "/home/example/repo/../outside.md", null],
+    ["C:/repo/project", "C:/repo/project/../outside.md", "C:/repo/outside.md"],
+  ] as const)(
+    "requires consent before opening or revealing traversal outside %s",
+    async (cwd, filePath, normalizedTarget) => {
+      installDesktopCapabilityStub();
+      confirmMock.mockResolvedValueOnce(false);
+      showContextMenuMock.mockResolvedValueOnce("reveal");
+      const screen = await render(<ChatMarkdown text={`[Outside](${filePath})`} cwd={cwd} />);
+      try {
+        const link = page.getByRole("link", { name: "outside.md" });
+        await expect.element(link).toHaveAttribute("data-open-policy", "confirm");
+        const anchor = document.querySelector<HTMLAnchorElement>(".chat-markdown-file-link");
+        expect(anchor).not.toBeNull();
+        const actionPath = anchor!.getAttribute("href")!;
+        // Native Windows browser handling can canonicalize drive URL dot
+        // segments before delivering the link destination. Accept only that
+        // exact alternate spelling of this outside fixture; POSIX retains its
+        // source spelling because collapsing segments can change symlink
+        // traversal. Consent and both actions must agree on the rendered target.
+        const allowedTargets = normalizedTarget ? [filePath, normalizedTarget] : [filePath];
+        expect(allowedTargets).toContain(actionPath);
+        await link.click();
+        await vi.waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(1));
+        expect(confirmMock).toHaveBeenLastCalledWith(expect.stringContaining(actionPath));
+        expect(openInPreferredEditorMock).not.toHaveBeenCalled();
+
+        confirmMock.mockResolvedValueOnce(false);
+        anchor!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+        await vi.waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(2));
+        expect(confirmMock).toHaveBeenLastCalledWith(expect.stringContaining(actionPath));
+        expect(revealPathMock).not.toHaveBeenCalled();
+
+        await link.click();
+        await vi.waitFor(() =>
+          expect(openInPreferredEditorMock).toHaveBeenCalledWith(expect.anything(), actionPath),
+        );
+        expect(openInPreferredEditorMock).toHaveBeenCalledTimes(1);
+        expect(confirmMock).toHaveBeenCalledTimes(3);
+        expect(confirmMock).toHaveBeenLastCalledWith(expect.stringContaining(actionPath));
+        showContextMenuMock.mockResolvedValueOnce("reveal");
+        anchor!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+        await vi.waitFor(() => expect(revealPathMock).toHaveBeenCalledWith(actionPath));
+        expect(revealPathMock).toHaveBeenCalledTimes(1);
+        expect(confirmMock).toHaveBeenCalledTimes(4);
+        expect(confirmMock).toHaveBeenLastCalledWith(expect.stringContaining(actionPath));
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
 
   it("copies markdown file paths instead of opening editors in pure browser sessions", async () => {
     const writeText = vi.fn(async () => undefined);

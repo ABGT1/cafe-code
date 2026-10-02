@@ -1,3 +1,8 @@
+import {
+  extractMarkdownLinkDestinations,
+  transformOutsideMarkdownLinkDestinations,
+} from "../markdown-links";
+
 const FENCE_START_PATTERN = /^([ \t]{0,3})(`{3,}|~{3,})([^\n]*)$/;
 
 const TEX_COMMAND_PATTERN =
@@ -510,9 +515,23 @@ function escapeTextttLiteralUnderscores(tex: string): string {
 
 function normalizeLiteralTextCommandsInMathChunk(markdown: string): string {
   const output: string[] = [];
+  const destinations = extractMarkdownLinkDestinations(markdown);
+  let destinationIndex = 0;
   let cursor = 0;
 
   while (cursor < markdown.length) {
+    while (destinations[destinationIndex] && cursor >= destinations[destinationIndex]!.end)
+      destinationIndex += 1;
+    const destination = destinations[destinationIndex];
+    if (destination && cursor >= destination.start) {
+      // A real destination encountered outside an admitted math span is inert
+      // source, even when its filename contains convincing `$\texttt{...}$`.
+      // For a real formula that starts before link-shaped TeX content, the
+      // whole math body is repaired below before this cursor reaches it.
+      output.push(markdown.slice(cursor, destination.end));
+      cursor = destination.end;
+      continue;
+    }
     const character = markdown[cursor] ?? "";
 
     // Markdown code spans can contain convincing-looking `$...$` examples.
@@ -591,11 +610,16 @@ function normalizeLiteralTextCommandsInMath(text: string): string {
  * leaving ordinary non-math code fences untouched.
  */
 export function normalizeChatMarkdownMath(text: string): string {
+  // Restore destinations before math-only text repairs: link-shaped content
+  // can be literal TeX inside an already delimited formula, e.g.
+  // `$\texttt{[f](a_b.md)}$`, and its underscores must still be repaired.
   return normalizeLiteralTextCommandsInMath(
-    normalizeStandaloneMathParagraphs(
-      normalizeLatexDelimiters(
-        normalizeDollarDisplayDelimiters(
-          normalizeTableRowMathDelimiters(normalizeMathFences(text)),
+    transformOutsideMarkdownLinkDestinations(text, (protectedText) =>
+      normalizeStandaloneMathParagraphs(
+        normalizeLatexDelimiters(
+          normalizeDollarDisplayDelimiters(
+            normalizeTableRowMathDelimiters(normalizeMathFences(protectedText)),
+          ),
         ),
       ),
     ),
