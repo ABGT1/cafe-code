@@ -31,8 +31,11 @@ import { LRUCache } from "../lib/lruCache";
 import { copyTextToClipboard } from "../lib/copyToClipboard";
 import { useTheme } from "../hooks/useTheme";
 import {
-  normalizeMarkdownLinkDestination,
+  decodeMarkdownLinkDestination,
+  extractMarkdownLinkDestinations,
+  remarkNativeFileDestinations,
   resolveMarkdownFileLinkMeta,
+  resolveMarkdownFileLinkTarget,
   rewriteMarkdownFileUriHref,
 } from "../markdown-links";
 import { readLocalApi } from "../localApi";
@@ -354,8 +357,6 @@ interface MarkdownFileLinkProps {
   className?: string | undefined;
 }
 
-const MARKDOWN_LINK_HREF_PATTERN =
-  /\[[^\]]*]\(\s*(?:<([^>\r\n]+)>|([^\s)]+))(?:\s+["'][^"']*["'])?\)/g;
 const MARKDOWN_FILE_LINK_CLASS_NAME =
   "chat-markdown-file-link relative top-[2px] max-w-full no-underline";
 const MARKDOWN_FILE_LINK_ICON_CLASS_NAME = "chat-markdown-file-link-icon size-3.5 shrink-0";
@@ -433,21 +434,6 @@ function buildFileLinkParentSuffixByPath(filePaths: ReadonlyArray<string>): Map<
   return suffixByPath;
 }
 
-function extractMarkdownLinkHrefs(text: string): string[] {
-  const hrefs: string[] = [];
-  for (const match of text.matchAll(MARKDOWN_LINK_HREF_PATTERN)) {
-    const href = (match[1] ?? match[2])?.trim();
-    if (!href) continue;
-    hrefs.push(href);
-  }
-  return hrefs;
-}
-
-function normalizeMarkdownLinkHrefKey(href: string): string {
-  const normalizedHref = normalizeMarkdownLinkDestination(href);
-  return rewriteMarkdownFileUriHref(normalizedHref) ?? normalizedHref;
-}
-
 const MarkdownFileLink = memo(function MarkdownFileLink({
   href,
   targetPath,
@@ -492,7 +478,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
     if (!api) {
       toastManager.add({
         type: "error",
-        title: "Open in editor is unavailable",
+        title: "Open file is unavailable",
       });
       return;
     }
@@ -567,7 +553,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
 
       const clicked = await api.contextMenu.show(
         [
-          ...(canOpenLocalEditor ? ([{ id: "open", label: "Open in editor" }] as const) : []),
+          ...(canOpenLocalEditor ? ([{ id: "open", label: "Open file" }] as const) : []),
           ...(canRevealLocalPath
             ? ([{ id: "reveal", label: getFileManagerRevealLabel() }] as const)
             : []),
@@ -679,8 +665,8 @@ function ChatMarkdown({
       string,
       NonNullable<ReturnType<typeof resolveMarkdownFileLinkMeta>>
     >();
-    for (const href of extractMarkdownLinkHrefs(normalizedText)) {
-      const normalizedHref = normalizeMarkdownLinkHrefKey(href);
+    for (const { value } of extractMarkdownLinkDestinations(normalizedText)) {
+      const normalizedHref = decodeMarkdownLinkDestination(value, cwd);
       if (metaByHref.has(normalizedHref)) continue;
       const meta = resolveMarkdownFileLinkMeta(normalizedHref, cwd, additionalWorkspaceRoots);
       if (meta) {
@@ -693,9 +679,18 @@ function ChatMarkdown({
     const filePaths = [...markdownFileLinkMetaByHref.values()].map((meta) => meta.filePath);
     return buildFileLinkParentSuffixByPath(filePaths);
   }, [markdownFileLinkMetaByHref]);
-  const markdownUrlTransform = useCallback((href: string) => {
-    return rewriteMarkdownFileUriHref(href) ?? defaultUrlTransform(href);
-  }, []);
+  const markdownUrlTransform = useCallback(
+    (href: string) => {
+      // Native paths deliberately pass through the same recognition policy
+      // before becoming actionable. Restoration occurs in the parsed AST;
+      // a rejected/sanitized href can never be recovered from raw source here.
+      return (
+        rewriteMarkdownFileUriHref(href) ??
+        (resolveMarkdownFileLinkTarget(href, cwd) ? href : defaultUrlTransform(href))
+      );
+    },
+    [cwd],
+  );
   const markdownComponents = useMemo<Components>(
     () => ({
       p({ node: _node, children, ...props }) {
@@ -704,31 +699,10 @@ function ChatMarkdown({
       li({ node: _node, children, ...props }) {
         return <li {...props}>{renderSkillInlineMarkdownChildren(children, skills)}</li>;
       },
-      a({ node, href, ...props }) {
-        const normalizedHref = href ? normalizeMarkdownLinkHrefKey(href) : "";
-        const sourceHref =
-          node?.position?.start.offset !== undefined && node.position.end.offset !== undefined
-            ? extractMarkdownLinkHrefs(
-                normalizedText.slice(node.position.start.offset, node.position.end.offset),
-              )[0]
-            : undefined;
-        // Only Windows drive paths need literal source backslashes restored.
-        // Other links must keep Markdown's parsed destination: the pre-scan
-        // is not a parser and can truncate balanced parentheses or retain escapes.
-        const normalizedSourceHref =
-          sourceHref && /^\/?[A-Za-z]:[\\/]/.test(sourceHref) && sourceHref.includes("\\")
-            ? normalizeMarkdownLinkHrefKey(sourceHref)
-            : "";
-        const fileLinkMeta =
-          (normalizedSourceHref
-            ? markdownFileLinkMetaByHref.get(normalizedSourceHref)
-            : undefined) ??
-          (normalizedSourceHref
-            ? resolveMarkdownFileLinkMeta(normalizedSourceHref, cwd, additionalWorkspaceRoots)
-            : null) ??
-          (normalizedHref
-            ? resolveMarkdownFileLinkMeta(normalizedHref, cwd, additionalWorkspaceRoots)
-            : null);
+      a({ node: _node, href, ...props }) {
+        const fileLinkMeta = href
+          ? resolveMarkdownFileLinkMeta(href, cwd, additionalWorkspaceRoots)
+          : null;
         if (!fileLinkMeta) {
           if (!href) {
             return <span className={props.className}>{props.children}</span>;
@@ -798,8 +772,6 @@ function ChatMarkdown({
       diffThemeName,
       fileLinkParentSuffixByPath,
       isStreaming,
-      markdownFileLinkMetaByHref,
-      normalizedText,
       resolvedTheme,
       skills,
     ],
@@ -808,7 +780,7 @@ function ChatMarkdown({
   return (
     <div className="chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/80">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkChatMath]}
+        remarkPlugins={[remarkGfm, remarkChatMath, [remarkNativeFileDestinations, { cwd }]]}
         rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false, trust: false }]]}
         components={markdownComponents}
         urlTransform={markdownUrlTransform}

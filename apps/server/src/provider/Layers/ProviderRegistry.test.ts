@@ -2891,7 +2891,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           }),
       );
 
-      it.effect("ignores Codex auth metadata when the auth file is a symlink", () =>
+      it.effect("ignores Codex auth metadata when the auth file is a symlink", (context) =>
         Effect.gen(function* () {
           const fileSystem = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
@@ -2916,7 +2916,28 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               },
             }),
           );
-          yield* fileSystem.symlink(targetPath, path.join(homePath, "auth.json"));
+          yield* fileSystem.symlink(targetPath, path.join(homePath, "auth.json")).pipe(
+            Effect.catch((error) => {
+              const cause = error.reason.cause;
+              // This test has one invariant: real symlinked auth material must
+              // never supply account metadata. Windows may deny creating that
+              // fixture without Developer Mode or administrator privileges.
+              // Inspect the original OS code rather than treating every Effect
+              // permission/Unknown error as an unavailable symlink capability.
+              // Scoped fixture directories still retire on the skipped path.
+              if (
+                process.platform === "win32" &&
+                cause instanceof Error &&
+                "code" in cause &&
+                cause.code === "EPERM"
+              ) {
+                return Effect.sync(() =>
+                  context.skip("Windows does not permit this auth-file symlink fixture."),
+                );
+              }
+              return Effect.fail(error);
+            }),
+          );
 
           const status = yield* checkCodexCliProviderStatus(decodeCodexSettings({ homePath })).pipe(
             Effect.provide(

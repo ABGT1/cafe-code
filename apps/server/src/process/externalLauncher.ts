@@ -25,6 +25,11 @@ import * as Encoding from "effect/Encoding";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import {
+  resolveWindowsEditorCommand,
+  windowsEditorNodeEnvironment,
+  type WindowsEditorCommandResolution,
+} from "./windowsEditorCommand.ts";
 
 // ==============================
 // Definitions
@@ -37,6 +42,7 @@ export { isCommandAvailable } from "@cafecode/shared/shell";
 interface EditorLaunch {
   readonly command: string;
   readonly args: ReadonlyArray<string>;
+  readonly windowsNodeMode?: boolean;
 }
 
 interface TerminalLaunch {
@@ -152,6 +158,20 @@ function resolveAvailableCommand(
     }
   }
   return Option.none();
+}
+
+function resolveWindowsEditorCommands(
+  commands: readonly string[],
+  env: NodeJS.ProcessEnv,
+): WindowsEditorCommandResolution {
+  for (const command of commands) {
+    const resolved = resolveWindowsEditorCommand(command, env);
+    // An installed but unsupported shim must not select a later alias or a
+    // second PATH installation. Availability and an explicit launch inspect
+    // the same first installed command and fail shut on the same admission.
+    if (resolved._tag !== "Missing") return resolved;
+  }
+  return { _tag: "Missing" };
 }
 
 function encodeUtf16LeBase64(input: string): string {
@@ -308,6 +328,13 @@ export function resolveAvailableEditors(
       continue;
     }
 
+    if (platform === "win32") {
+      if (resolveWindowsEditorCommands(editor.commands, env)._tag === "Resolved") {
+        available.push(editor.id);
+      }
+      continue;
+    }
+
     const command = resolveAvailableCommand(editor.commands, { platform, env }, commandAvailable);
     if (Option.isSome(command)) {
       available.push(editor.id);
@@ -399,6 +426,22 @@ export const resolveEditorLaunch = Effect.fn("resolveEditorLaunch")(function* (
   }
 
   if (editorDef.commands) {
+    if (platform === "win32") {
+      const resolved = resolveWindowsEditorCommands(editorDef.commands, env);
+      if (resolved._tag !== "Resolved") {
+        return yield* new ExternalLauncherError({
+          message:
+            resolved._tag === "Missing"
+              ? "Editor command not found."
+              : "Installed editor command cannot be launched safely on Windows.",
+        });
+      }
+      return {
+        command: resolved.value.command,
+        args: [...resolved.value.argumentPrefix, ...resolveEditorArgs(editorDef, input.cwd)],
+        ...(resolved.value.nodeMode ? { windowsNodeMode: true } : {}),
+      };
+    }
     const command = Option.getOrElse(
       resolveAvailableCommand(editorDef.commands, { platform, env }, commandAvailable),
       () => editorDef.commands[0],
@@ -426,6 +469,9 @@ export function resolveEditorProcessLaunch(
     args: [...launch.args],
     options: {
       ...detachedDesktopProcessOptions(platform, env),
+      ...(platform === "win32" && launch.windowsNodeMode
+        ? { env: windowsEditorNodeEnvironment(env), extendEnv: false }
+        : {}),
       shell: false,
     },
   };

@@ -36,9 +36,12 @@ function cell(day: string): HTMLElement {
 }
 
 async function hoverCell(day: string): Promise<HTMLElement> {
-  // Real browser layout and React's pointer-enter handling are exercised
-  // without requiring an offscreen historic day to be initially visible.
-  cell(day).dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+  // A synthetic pointerover does not move Chromium's real pointer. Scrolling
+  // a virtual calendar underneath that pointer can deliver a later trusted
+  // pointerover for another day and correctly replace the synthetic tooltip.
+  // Let Playwright wait for the target's layout stability and move the native
+  // pointer to that exact cell, including historic cells that need scrolling.
+  await page.elementLocator(cell(day)).hover();
   await vi.waitFor(() =>
     expect(
       document.querySelector('[role="tooltip"]')?.getAttribute("data-activity-tooltip-day"),
@@ -80,6 +83,19 @@ describe("ActivityHeatmap selected calendars", () => {
     ) {
       await page.viewport(originalViewport.width, originalViewport.height);
     }
+  });
+
+  it("hovers the requested day after scrolling moves the calendar under a stationary pointer", async () => {
+    mounted = await render(
+      <ActivityHeatmap days={[]} bounds={{ startDay: "2022-01-01", endDay: "2026-07-21" }} />,
+    );
+    expect((await hoverCell("2022-01-01")).textContent).toContain("No generating time");
+    const scroller = requiredElement('[data-activity-heatmap-scroll="true"]');
+    scroller.scrollLeft = scroller.scrollWidth;
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-activity-day="2026-07-21"]')).not.toBeNull(),
+    );
+    expect((await hoverCell("2026-07-21")).textContent).toContain("Jul 21, 2026");
   });
 
   it.each([

@@ -2,6 +2,84 @@ import { describe, expect, it } from "vitest";
 import katex from "katex";
 import { normalizeChatMarkdownMath } from "./chatMarkdownMath";
 
+describe("math normalization around file links", () => {
+  it.each([
+    String.raw`$\texttt{[f](a_b)}$`,
+    String.raw`$\texttt{[f](a_b.md)}$`,
+    String.raw`$$\texttt{[f](a_b.md)}$$`,
+    String.raw`\(\texttt{[f](a_b.md)}\)`,
+    String.raw`\[\texttt{[f](a_b.md)}\]`,
+  ])("keeps math-only text repairs after restoring link-shaped content: %s", (formula) => {
+    const normalized = normalizeChatMarkdownMath(
+      `The identifier below reads ${formula} in this formula.`,
+    );
+    expect(normalized).toContain(String.raw`\texttt{[f](a\_b`);
+    const body = normalized.match(/\${1,2}([^$]+)\${1,2}/)?.[1] ?? "";
+    expect(body).toContain(String.raw`\texttt{[f](a\_b`);
+    expect(() => katex.renderToString(body, { throwOnError: true, trust: false })).not.toThrow();
+  });
+
+  it("keeps standalone link-shaped equations available to the existing math classifier", () => {
+    expect(normalizeChatMarkdownMath("[f](x^2)")).toBe("$$\n[f](x^2)\n$$");
+  });
+
+  it("leaves a math-looking filename intact while repairing real adjacent math", () => {
+    const link = String.raw`[Review](</home/example/repo/$\texttt{source_identifier}$.md>)`;
+    expect(
+      normalizeChatMarkdownMath(link + "\n\n" + String.raw`Compute $\texttt{source_identifier}$.`),
+    ).toBe(link + "\n\n" + String.raw`Compute $\texttt{source\_identifier}$.`);
+  });
+  it.each(["math", "tex", "latex"])(
+    "keeps equation-shaped link syntax in %s fences available to math normalization",
+    (language) => {
+      expect(normalizeChatMarkdownMath([`\`\`\`${language}`, "[f](x^2)", "```"].join("\n"))).toBe(
+        "$$\n[f](x^2)\n$$",
+      );
+      expect(
+        normalizeChatMarkdownMath(
+          [`\`\`\`${language}`, String.raw`[f](\texttt{source_id})`, "```"].join("\n"),
+        ),
+      ).toBe("$$\n" + String.raw`[f](\texttt{source\_id})` + "\n$$");
+    },
+  );
+
+  it("keeps ordinary and unterminated equation fences as literal source beside real links", () => {
+    const link = String.raw`[Review](src/review\(final\).md)`;
+    const ordinary = ["```text", "[f](x^2)", "```", "", link].join("\n");
+    const incomplete = [link, "", "```math", "[f](x^2)"].join("\n");
+    expect(normalizeChatMarkdownMath(ordinary)).toBe(ordinary);
+    expect(normalizeChatMarkdownMath(incomplete)).toBe(incomplete);
+  });
+  it.each([
+    String.raw`[Review](/home/example/repo/review\(final\).md)`,
+    String.raw`[Review](</Users/example/repo/review\(final\).md>)`,
+    String.raw`[Review](src/review\(final\).md:2:7)`,
+    String.raw`[Review](src/review\(final\).md#L2C7)`,
+    String.raw`[Review](review\(final\).md#L2C7)`,
+    String.raw`[Review](<C:\repo\review packets\(final).md>)`,
+    String.raw`[Review](https://example.com/review\(final\)?cost=$5)`,
+    "[Review][notes]\n\n" + String.raw`[notes]: <C:\repo\.docs\review\(final).md>`,
+    String.raw`> [Review][notes]` +
+      "\n>\n> " +
+      String.raw`[notes]: </home/example/repo/review\(final\).md>`,
+  ])("preserves destination escapes while normalizing surrounding TeX: %s", (link) => {
+    expect(normalizeChatMarkdownMath(`${link}\n\nCompute \\(x + 1\\).`)).toBe(
+      `${link}\n\nCompute $x + 1$.`,
+    );
+  });
+
+  it("preserves code-fence context and restores collision-free destination tokens", () => {
+    const source = [
+      "CAFELINKDESTINATION0X0END CAFELINKDESTINATION1X0END",
+      "```text",
+      String.raw`[Review](src/review\(final\).md)`,
+      String.raw`\(literal code\)`,
+      "```",
+    ].join("\n");
+    expect(normalizeChatMarkdownMath(source)).toBe(source);
+  });
+});
+
 describe("normalizeChatMarkdownMath", () => {
   it("does not apply TeX repairs to prose between currency amounts", () => {
     const text =

@@ -1,13 +1,109 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  decodeMarkdownLinkDestination,
+  extractMarkdownLinkDestinations,
   isPathInsideWorkspace,
   resolveMarkdownFileLinkMeta,
   resolveMarkdownFileLinkTarget,
   rewriteMarkdownFileUriHref,
 } from "./markdown-links";
 
+describe("Markdown destination source ranges", () => {
+  it("ignores destinations inside closed and streaming code fences", () => {
+    const source = [
+      "[Before](src/before.md)",
+      "```math",
+      "[f](x^2)",
+      "```",
+      "[After](src/after.md)",
+      "~~~text",
+      "[Literal](src/literal.md)",
+    ].join("\n");
+    expect(extractMarkdownLinkDestinations(source).map(({ value }) => value)).toEqual([
+      "src/before.md",
+      "src/after.md",
+    ]);
+  });
+  it("bounds malformed destinations and nesting instead of scanning an entire message per opening", () => {
+    const oversized = "[Review](<C:/repo/" + "x".repeat(32_768) + ".md>)";
+    const tooDeep = "[Review](src/" + "(".repeat(33) + "review" + ")".repeat(33) + ".md)";
+    expect(extractMarkdownLinkDestinations(oversized)).toEqual([]);
+    expect(extractMarkdownLinkDestinations(tooDeep)).toEqual([]);
+    expect(extractMarkdownLinkDestinations("][".repeat(1_000) + "]( ".repeat(1_000))).toEqual([]);
+  });
+  it("keeps balanced parentheses, angle destinations and reference definitions intact", () => {
+    const source = String.raw`[nested](src/review(final(v2)).md:2:7)
+[spaced](<C:\repo\review packets\(final).md>)
+
+[notes]: </home/example/repo/review\(final\).md> "review title"`;
+    expect(
+      extractMarkdownLinkDestinations(source).map(({ value, start, end }) => {
+        expect(source.slice(start, end)).toBe(value);
+        return value;
+      }),
+    ).toEqual([
+      "src/review(final(v2)).md:2:7",
+      String.raw`C:\repo\review packets\(final).md`,
+      String.raw`/home/example/repo/review\(final\).md`,
+    ]);
+  });
+
+  it("decodes POSIX punctuation escapes while retaining native drive/UNC separators", () => {
+    expect(decodeMarkdownLinkDestination(String.raw`src/review\(final\).md`)).toBe(
+      "src/review(final).md",
+    );
+    expect(decodeMarkdownLinkDestination(String.raw`C:\repo\.docs\review.md`)).toBe(
+      String.raw`C:\repo\.docs\review.md`,
+    );
+    expect(decodeMarkdownLinkDestination(String.raw`\\server\share\.docs\review.md`)).toBe(
+      String.raw`\\server\share\.docs\review.md`,
+    );
+    expect(decodeMarkdownLinkDestination(String.raw`C:\repo\.docs\review &amp; notes.md`)).toBe(
+      String.raw`C:\repo\.docs\review & notes.md`,
+    );
+    expect(decodeMarkdownLinkDestination(String.raw`.\.docs\review.md`, "C:/repo")).toBe(
+      String.raw`.\.docs\review.md`,
+    );
+  });
+
+  it.each([
+    "C:/repo",
+    String.raw`C:\repo`,
+    String.raw`\\server\share\repo`,
+    "/Users/example/repo",
+    "/home/example/repo",
+  ])("retains CommonMark punctuation escapes in slash-based relative URLs under %s", (cwd) => {
+    expect(decodeMarkdownLinkDestination(String.raw`src/review\(final\).md`, cwd)).toBe(
+      "src/review(final).md",
+    );
+    expect(decodeMarkdownLinkDestination(String.raw`review\(final\).md`, cwd)).toBe(
+      "review(final).md",
+    );
+    expect(decodeMarkdownLinkDestination(String.raw`review\_final.md`, cwd)).toBe(
+      "review_final.md",
+    );
+  });
+
+  it("retains genuinely native backslash relative directories under a Windows cwd", () => {
+    expect(decodeMarkdownLinkDestination(String.raw`src\.docs\review.md`, "C:/repo")).toBe(
+      String.raw`src\.docs\review.md`,
+    );
+    expect(decodeMarkdownLinkDestination(String.raw`.\_docs\review.md`, "C:/repo")).toBe(
+      String.raw`.\_docs\review.md`,
+    );
+  });
+});
+
 describe("rewriteMarkdownFileUriHref", () => {
+  it("preserves remote file authorities as UNC shares instead of opening a local path", () => {
+    expect(rewriteMarkdownFileUriHref("file://server/share/review%20(final).md#L2C7")).toBe(
+      String.raw`\\server\share\review%20(final).md#L2C7`,
+    );
+    expect(resolveMarkdownFileLinkTarget("file://server/share/review%20(final).md#L2C7")).toBe(
+      String.raw`\\server\share\review (final).md:2:7`,
+    );
+  });
   it("rewrites file uri hrefs into direct path hrefs", () => {
     expect(rewriteMarkdownFileUriHref("file:///Users/julius/project/src/main.ts#L42")).toBe(
       "/Users/julius/project/src/main.ts#L42",
@@ -77,6 +173,18 @@ describe("resolveMarkdownFileLinkTarget", () => {
 
   it("ignores external urls", () => {
     expect(resolveMarkdownFileLinkTarget("https://example.com/docs")).toBeNull();
+  });
+
+  it.each([
+    "//example.com/review.md",
+    "javascript:alert(1)",
+    "javascript%3Aalert(1)",
+    "data:text/html,alert(1)",
+    "vbscript:alert(1)",
+    "https://example.com/review.md",
+    "#review.md",
+  ])("never classifies a web/hostile destination as a native file: %s", (href) => {
+    expect(resolveMarkdownFileLinkTarget(href, "C:/repo")).toBeNull();
   });
 
   it("does not double-decode file URLs", () => {
@@ -153,6 +261,24 @@ describe("resolveMarkdownFileLinkTarget", () => {
 });
 
 describe("markdown file link workspace policy", () => {
+  it.each([
+    ["/Users/example/repo", "/Users/example/repo/../outside.md"],
+    ["/home/example/repo", "/home/example/repo/src/../../outside.md"],
+    ["/home/example/repo", "../outside.md"],
+    ["C:/repo/project", "C:/repo/project/../outside.md"],
+    ["C:/repo/project", "..\\outside.md"],
+    [String.raw`\\server\share\repo`, String.raw`\\server\share\repo\..\outside.md`],
+  ])("requires consent for traversal from %s to %s", (cwd, href) => {
+    expect(resolveMarkdownFileLinkMeta(href, cwd)?.openPolicy).toBe("confirm");
+  });
+
+  it("retains case-sensitive POSIX workspace comparisons and treats prefixes as whole segments", () => {
+    expect(isPathInsideWorkspace("/home/example/Repo/review.md", "/home/example/repo")).toBe(false);
+    expect(isPathInsideWorkspace("/home/example/repository/review.md", "/home/example/repo")).toBe(
+      false,
+    );
+    expect(isPathInsideWorkspace("C:/REPO/review.md", "c:/repo")).toBe(true);
+  });
   it("allows direct opens for POSIX paths inside the workspace", () => {
     expect(
       resolveMarkdownFileLinkMeta("/Users/julius/project/src/main.ts#L42", "/Users/julius/project"),

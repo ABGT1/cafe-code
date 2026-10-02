@@ -34,10 +34,16 @@ export function formatWorkspaceRelativePath(
       normalizePathSeparators(trimTrailingPathSeparators(workspaceRoot)),
     );
     const workspaceLabel = basenameOfPath(normalizedWorkspaceRoot);
-    const pathForCompare = normalizedPath.toLowerCase();
-    const workspaceForCompare = normalizedWorkspaceRoot.toLowerCase();
+    // Windows roots compare without case; POSIX paths must retain case so an
+    // outside path is never presented as a different workspace-relative file.
+    const windowsWorkspace =
+      /^[A-Za-z]:\//.test(normalizedWorkspaceRoot) || normalizedWorkspaceRoot.startsWith("//");
+    const pathForCompare = windowsWorkspace ? normalizedPath.toLowerCase() : normalizedPath;
+    const workspaceForCompare = windowsWorkspace
+      ? normalizedWorkspaceRoot.toLowerCase()
+      : normalizedWorkspaceRoot;
     const workspaceWithSeparator = `${workspaceForCompare}/`;
-    const workspaceLabelWithSeparator = `${workspaceLabel.toLowerCase()}/`;
+    const workspaceLabelWithSeparator = `${windowsWorkspace ? workspaceLabel.toLowerCase() : workspaceLabel}/`;
 
     if (pathForCompare === workspaceForCompare) {
       displayPath = workspaceLabel;
