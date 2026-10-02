@@ -217,7 +217,19 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
     "opus-4.6": "claude-opus-4-6",
     "claude-opus-4.6": "claude-opus-4-6",
     "claude-opus-4-6-20251117": "claude-opus-4-6",
+    // Preserve Cafe's legacy Sonnet alias meaning for saved selections. Native
+    // aliases vary by CLI version and backend, which this driver-wide schema
+    // cannot qualify; Sonnet 5.5 therefore requires an explicit selection.
+    // https://code.claude.com/docs/en/model-config#version-history
     sonnet: "claude-sonnet-5",
+    "sonnet-5.5": "claude-sonnet-5-5",
+    "claude-sonnet-5.5": "claude-sonnet-5-5",
+    "sonnet-5-5": "claude-sonnet-5-5",
+    "sonnet5.5": "claude-sonnet-5-5",
+    sonnet55: "claude-sonnet-5-5",
+    sonnet_5_5: "claude-sonnet-5-5",
+    "claude-sonnet-5-5[1m]": "claude-sonnet-5-5",
+    "sonnet-5-5[1m]": "claude-sonnet-5-5",
     "sonnet-5": "claude-sonnet-5",
     sonnet5: "claude-sonnet-5",
     "claude-sonnet-5[1m]": "claude-sonnet-5",

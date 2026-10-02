@@ -453,11 +453,11 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("loads Claude filesystem settings sources for SDK sessions", () => {
+  it.effect("binds Manual approvals while loading Claude filesystem settings sources", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
-      yield* adapter.startSession({
+      const session = yield* adapter.startSession({
         threadId: THREAD_ID,
         provider: ProviderDriverKind.make("claudeAgent"),
         runtimeMode: "approval-required",
@@ -465,8 +465,18 @@ describe("ClaudeAdapterLive", () => {
 
       const createInput = harness.getLastCreateQueryInput();
       assert.deepEqual(createInput?.options.settingSources, ["user", "project", "local"]);
-      assert.equal(createInput?.options.permissionMode, undefined);
+      // SDK 0.3.286 delegates an omitted permission mode to native settings,
+      // including Auto defaults. Loading those sources must not override the
+      // user's explicit Manual policy, on creation or the first prompt.
+      assert.equal(createInput?.options.permissionMode, "default");
       assert.equal(createInput?.options.allowDangerouslySkipPermissions, undefined);
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "inspect with manual approvals",
+        interactionMode: "default",
+        attachments: [],
+      });
+      assert.deepEqual(harness.query.setPermissionModeCalls, []);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -592,6 +602,30 @@ describe("ClaudeAdapterLive", () => {
   it("resolves Claude model options without starting an SDK session", () => {
     const instanceId = ProviderInstanceId.make("claudeAgent");
     const cases = [
+      {
+        name: "Sonnet 5.5 uses medium effort and native context without an API suffix",
+        selection: createModelSelection(instanceId, "claude-sonnet-5-5"),
+        expected: {
+          model: "claude-sonnet-5-5",
+          effort: "medium",
+          context: undefined,
+          settings: {},
+        },
+      },
+      {
+        name: "Sonnet 5.5 honors max effort while ignoring stale Fast and 200K choices",
+        selection: createModelSelection(instanceId, "claude-sonnet-5-5", [
+          { id: "effort", value: "max" },
+          { id: "fastMode", value: true },
+          { id: "contextWindow", value: "200k" },
+        ]),
+        expected: {
+          model: "claude-sonnet-5-5",
+          effort: "max",
+          context: undefined,
+          settings: {},
+        },
+      },
       {
         name: "Opus 5.5 defaults to medium effort and its fixed 1M context",
         selection: createModelSelection(instanceId, "claude-opus-5-5"),
@@ -8690,7 +8724,7 @@ describe("ClaudeAdapterLive", () => {
           resumeSessionAt: "assistant-99",
           turnCount: 3,
         },
-        runtimeMode: "full-access",
+        runtimeMode: "approval-required",
       });
 
       assert.equal(session.threadId, RESUME_THREAD_ID);
@@ -8704,6 +8738,8 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(createInput?.options.resume, "550e8400-e29b-41d4-a716-446655440000");
       assert.equal(createInput?.options.sessionId, undefined);
       assert.equal(createInput?.options.resumeSessionAt, undefined);
+      assert.equal(createInput?.options.permissionMode, "default");
+      assert.equal(createInput?.options.allowDangerouslySkipPermissions, undefined);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -9646,50 +9682,74 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("switches an established Claude session into Auto mode through the SDK", () => {
-    const harness = makeHarness();
-    return Effect.gen(function* () {
-      const adapter = yield* ClaudeAdapter;
-      const session = yield* adapter.startSession({
-        threadId: THREAD_ID,
-        provider: ProviderDriverKind.make("claudeAgent"),
-        runtimeMode: "approval-required",
-        interactionMode: "default",
-      });
-      const firstTurn = yield* adapter.sendTurn({
-        threadId: session.threadId,
-        input: "inspect this",
-        interactionMode: "default",
-        attachments: [],
-      });
-      const turnCompletedFiber = yield* Stream.filter(
-        adapter.streamEvents,
-        (event) => event.type === "turn.completed",
-      ).pipe(Stream.runHead, Effect.forkChild);
-      harness.query.emit({
-        type: "result",
-        subtype: "success",
-        is_error: false,
-        errors: [],
-        session_id: "sdk-session-auto-transition",
-        uuid: "result-auto-transition",
-        user_message_uuid: firstTurn.turnId,
-      } as unknown as SDKMessage);
-      yield* Fiber.join(turnCompletedFiber);
+  it.effect(
+    "switches an established Claude session between Auto and Manual through the SDK",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const session = yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+        });
+        const firstTurn = yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "inspect this",
+          interactionMode: "default",
+          attachments: [],
+        });
+        const turnCompletedFiber = yield* Stream.filter(
+          adapter.streamEvents,
+          (event) => event.type === "turn.completed",
+        ).pipe(Stream.runHead, Effect.forkChild);
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          errors: [],
+          session_id: "sdk-session-auto-transition",
+          uuid: "result-auto-transition",
+          user_message_uuid: firstTurn.turnId,
+        } as unknown as SDKMessage);
+        yield* Fiber.join(turnCompletedFiber);
 
-      yield* adapter.sendTurn({
-        threadId: session.threadId,
-        input: "continue in auto mode",
-        interactionMode: "auto",
-        attachments: [],
-      });
+        const secondTurn = yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "continue in auto mode",
+          interactionMode: "auto",
+          attachments: [],
+        });
 
-      assert.deepEqual(harness.query.setPermissionModeCalls, ["auto"]);
-    }).pipe(
-      Effect.provideService(Random.Random, makeDeterministicRandomService()),
-      Effect.provide(harness.layer),
-    );
-  });
+        assert.deepEqual(harness.query.setPermissionModeCalls, ["auto"]);
+        const autoCompletedFiber = yield* Stream.filter(
+          adapter.streamEvents,
+          (event) => event.type === "turn.completed",
+        ).pipe(Stream.runHead, Effect.forkChild);
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          errors: [],
+          session_id: "sdk-session-auto-transition",
+          uuid: "result-manual-transition",
+          user_message_uuid: secondTurn.turnId,
+        } as unknown as SDKMessage);
+        yield* Fiber.join(autoCompletedFiber);
+        yield* adapter.sendTurn({
+          threadId: session.threadId,
+          input: "continue with manual approvals",
+          interactionMode: "default",
+          attachments: [],
+        });
+        assert.deepEqual(harness.query.setPermissionModeCalls, ["auto", "default"]);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
 
   it.effect.each<{ runtimeMode: RuntimeMode; expectedBase: PermissionMode }>([
     { runtimeMode: "full-access", expectedBase: "bypassPermissions" },

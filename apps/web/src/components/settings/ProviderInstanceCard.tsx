@@ -27,10 +27,10 @@ import {
 
 import { cn } from "../../lib/utils";
 import { ProviderUsageResetButton } from "../ProviderUsageResetButton";
+import { ProviderAccountQuotaDetails } from "../ProviderAccountQuotaDetails";
 import { ensureLocalApi } from "../../localApi";
 import {
-  formatCodexRateLimitResetAvailability,
-  formatCodexRateLimitSummary,
+  formatCodexRateLimitPresentation,
   shouldSurfaceProviderAccountRateLimits,
 } from "../../lib/codexRateLimits";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
@@ -164,7 +164,7 @@ function ProviderAuthEmail(props: {
   if (!trimmed) return null;
 
   return (
-    <span className="inline-flex min-w-0 items-center gap-1.5">
+    <span className="inline-flex min-w-0 max-w-full items-center gap-1.5">
       {props.separator ? <span aria-hidden>·</span> : null}
       {props.prefix ? <span className="text-muted-foreground/80">{props.prefix}</span> : null}
       <RedactedSensitiveText
@@ -172,6 +172,7 @@ function ProviderAuthEmail(props: {
         ariaLabel="Toggle account email visibility"
         revealTooltip="Click to reveal email"
         hideTooltip="Click to hide email"
+        className="[overflow-wrap:anywhere]"
       />
     </span>
   );
@@ -753,23 +754,9 @@ export function ProviderInstanceCard({
   const authenticatedDetail = hasAuthenticatedEmail
     ? (liveProvider?.auth.label ?? liveProvider?.auth.type ?? null)
     : null;
-  const codexRateLimitSummary = shouldSurfaceProviderAccountRateLimits(liveProvider)
-    ? formatCodexRateLimitSummary(liveProvider?.accountRateLimits)
+  const accountQuota = shouldSurfaceProviderAccountRateLimits(liveProvider)
+    ? formatCodexRateLimitPresentation(liveProvider?.accountRateLimits)
     : null;
-  const codexRateLimitWindowText = codexRateLimitSummary
-    ? [codexRateLimitSummary.primary?.text, codexRateLimitSummary.secondary?.text]
-        .filter((part): part is string => Boolean(part))
-        .join(" · ")
-    : null;
-  const codexRateLimitResetText = codexRateLimitSummary
-    ? [codexRateLimitSummary.primaryReset, codexRateLimitSummary.weeklyReset]
-        .filter((part): part is string => Boolean(part))
-        .join(" · ")
-    : null;
-  const codexRateLimitResetAvailabilityText =
-    liveProvider?.driver === "codex" && liveProvider.auth.status === "authenticated"
-      ? formatCodexRateLimitResetAvailability(liveProvider.accountRateLimits)
-      : null;
   const summary = rawSummary;
   const versionLabel = getProviderVersionLabel(liveProvider?.version);
   const versionAdvisory = getProviderVersionAdvisoryPresentation(liveProvider?.versionAdvisory);
@@ -906,11 +893,11 @@ export function ProviderInstanceCard({
   const titleHeadNode = (
     <>
       {titleIconNode}
-      <h3 className="truncate text-[13px] font-semibold tracking-[-0.01em] text-foreground">
+      <h3 className="max-w-full truncate text-[13px] font-semibold tracking-[-0.01em] text-foreground">
         {displayName}
       </h3>
       {String(instanceId) !== String(instance.driver) ? (
-        <code className="truncate rounded bg-muted/60 px-1 py-0.5 text-[10px] text-muted-foreground">
+        <code className="max-w-full truncate rounded bg-muted/60 px-1 py-0.5 text-[10px] text-muted-foreground">
           {instanceId}
         </code>
       ) : null}
@@ -953,7 +940,7 @@ export function ProviderInstanceCard({
   );
 
   const authRowNode = (
-    <p className="flex min-w-0 flex-wrap items-center gap-x-1 text-xs text-muted-foreground/80">
+    <p className="flex min-w-0 flex-wrap items-center gap-x-1 text-xs text-muted-foreground/80 [overflow-wrap:anywhere]">
       {hasAuthenticatedEmail ? (
         <>
           <span>Authenticated as</span>
@@ -971,134 +958,128 @@ export function ProviderInstanceCard({
   );
 
   const versionCodeNode = versionLabel ? (
-    <code className="text-xs text-muted-foreground">{versionLabel}</code>
+    <code className="max-w-full text-xs text-muted-foreground [overflow-wrap:anywhere]">
+      {versionLabel}
+    </code>
   ) : null;
 
   return (
-    <div className="border-t border-border/60 first:border-t-0">
+    <div
+      className="@container/provider-card min-w-0 border-t border-border/60 first:border-t-0"
+      data-provider-card
+    >
       <div className="px-4 py-3.5 sm:px-5">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="min-w-0 flex-1 space-y-1">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              {titleHeadNode}
-              {versionCodeNode}
-              {versionAdvisory ? (
-                <Popover>
-                  <PopoverTrigger
-                    render={
+        {/* Actions belong to the identity header, never the variable-height
+            quota body. Query the card's own width so a narrow settings column
+            stacks controls even in a large desktop window. */}
+        <div
+          className="grid min-w-0 items-start gap-x-3 gap-y-2 @min-[32rem]/provider-card:grid-cols-[minmax(0,1fr)_auto]"
+          data-provider-card-header
+        >
+          <div className="flex min-h-7 min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            {titleHeadNode}
+            {versionCodeNode}
+            {versionAdvisory ? (
+              <Popover>
+                <PopoverTrigger
+                  render={
+                    <Button
+                      type="button"
+                      size="icon-xs"
+                      variant="ghost"
+                      className={cn(
+                        "size-5 rounded-sm p-0",
+                        versionAdvisory.emphasis === "strong"
+                          ? "text-warning hover:text-warning"
+                          : "text-primary hover:text-primary",
+                      )}
+                      aria-label="Update available — view details"
+                    >
+                      <ArrowUpCircleIcon className="size-3.5 animate-bounce [--cafe-bounce-duration:2.4s] [--cafe-bounce-steps:72] motion-reduce:animate-none" />
+                    </Button>
+                  }
+                />
+                <PopoverPopup
+                  side="bottom"
+                  align="start"
+                  className="w-[min(21rem,calc(100vw-1.5rem))] [--popup-width:min(21rem,calc(100vw-1.5rem))]"
+                >
+                  <div className="grid min-w-0 gap-3">
+                    <div className="grid gap-0.5">
+                      <p className="text-[13px] font-semibold leading-tight text-foreground">
+                        Update available
+                      </p>
+                      <p
+                        className={cn(
+                          "text-xs leading-snug",
+                          versionAdvisory.emphasis === "strong"
+                            ? "text-warning"
+                            : "text-muted-foreground",
+                        )}
+                      >
+                        {versionAdvisory.detail}
+                      </p>
+                    </div>
+                    {onRunUpdate ? (
                       <Button
                         type="button"
-                        size="icon-xs"
-                        variant="ghost"
-                        className={cn(
-                          "size-5 rounded-sm p-0",
-                          versionAdvisory.emphasis === "strong"
-                            ? "text-warning hover:text-warning"
-                            : "text-primary hover:text-primary",
-                        )}
-                        aria-label="Update available — view details"
+                        size="xs"
+                        variant="default"
+                        className="w-full"
+                        disabled={isUpdating}
+                        onClick={onRunUpdate}
                       >
-                        <ArrowUpCircleIcon className="size-3.5 [animation:bounce_2.4s_ease-in-out_infinite] motion-reduce:animate-none" />
+                        {isUpdating ? <LoaderIcon className="animate-spin" /> : <DownloadIcon />}
+                        {isUpdating ? "Updating" : "Update now"}
                       </Button>
-                    }
-                  />
-                  <PopoverPopup
-                    side="bottom"
-                    align="start"
-                    className="w-[min(21rem,calc(100vw-1.5rem))] [--popup-width:min(21rem,calc(100vw-1.5rem))]"
-                  >
-                    <div className="grid min-w-0 gap-3">
-                      <div className="grid gap-0.5">
-                        <p className="text-[13px] font-semibold leading-tight text-foreground">
-                          Update available
-                        </p>
-                        <p
-                          className={cn(
-                            "text-xs leading-snug",
-                            versionAdvisory.emphasis === "strong"
-                              ? "text-warning"
-                              : "text-muted-foreground",
-                          )}
-                        >
-                          {versionAdvisory.detail}
-                        </p>
+                    ) : null}
+                    {onRunUpdate && updateCommand ? (
+                      <div className="flex items-center gap-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                        <span aria-hidden className="h-px flex-1 bg-border" />
+                        or, update manually using
+                        <span aria-hidden className="h-px flex-1 bg-border" />
                       </div>
-                      {onRunUpdate ? (
-                        <Button
-                          type="button"
-                          size="xs"
-                          variant="default"
-                          className="w-full"
-                          disabled={isUpdating}
-                          onClick={onRunUpdate}
-                        >
-                          {isUpdating ? <LoaderIcon className="animate-spin" /> : <DownloadIcon />}
-                          {isUpdating ? "Updating" : "Update now"}
-                        </Button>
-                      ) : null}
-                      {onRunUpdate && updateCommand ? (
-                        <div className="flex items-center gap-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                          <span aria-hidden className="h-px flex-1 bg-border" />
-                          or, update manually using
-                          <span aria-hidden className="h-px flex-1 bg-border" />
-                        </div>
-                      ) : null}
-                      {updateCommand ? (
-                        <div className="flex min-w-0 items-center gap-1 rounded-md border border-border/70 bg-muted/40 py-0.5 pr-0.5 pl-2">
-                          <ScrollArea scrollFade className="h-8 min-w-0 flex-1 rounded-none">
-                            <code className="flex h-full w-max items-center whitespace-nowrap pr-3 font-mono text-[11px] text-foreground">
-                              {updateCommand}
-                            </code>
-                          </ScrollArea>
-                          <Tooltip>
-                            <TooltipTrigger
-                              render={
-                                <Button
-                                  type="button"
-                                  size="icon-xs"
-                                  variant="ghost"
-                                  className="size-6 shrink-0 rounded-sm p-0 text-muted-foreground hover:text-foreground"
-                                  onClick={() =>
-                                    copyToClipboard(updateCommand, {
-                                      providerName: displayName,
-                                    })
-                                  }
-                                  aria-label="Copy update command"
-                                >
-                                  <CopyIcon className="size-3" />
-                                </Button>
-                              }
-                            />
-                            <TooltipPopup side="top">Copy command</TooltipPopup>
-                          </Tooltip>
-                        </div>
-                      ) : null}
-                    </div>
-                  </PopoverPopup>
-                </Popover>
-              ) : null}
-              {titleTailNode}
-            </div>
-            {authRowNode}
-            {codexRateLimitSummary || codexRateLimitResetAvailabilityText ? (
-              <div className="grid gap-0.5 text-xs leading-snug text-muted-foreground/80">
-                {codexRateLimitWindowText ? (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <p>Usage: {codexRateLimitWindowText}</p>
-                    <ProviderUsageResetButton
-                      provider={liveProvider}
-                      request={(input) => ensureLocalApi().server.usageReset(input)}
-                    />
+                    ) : null}
+                    {updateCommand ? (
+                      <div className="flex min-w-0 items-center gap-1 rounded-md border border-border/70 bg-muted/40 py-0.5 pr-0.5 pl-2">
+                        <ScrollArea scrollFade className="h-8 min-w-0 flex-1 rounded-none">
+                          <code className="flex h-full w-max items-center whitespace-nowrap pr-3 font-mono text-[11px] text-foreground">
+                            {updateCommand}
+                          </code>
+                        </ScrollArea>
+                        <Tooltip>
+                          <TooltipTrigger
+                            render={
+                              <Button
+                                type="button"
+                                size="icon-xs"
+                                variant="ghost"
+                                className="size-6 shrink-0 rounded-sm p-0 text-muted-foreground hover:text-foreground"
+                                onClick={() =>
+                                  copyToClipboard(updateCommand, {
+                                    providerName: displayName,
+                                  })
+                                }
+                                aria-label="Copy update command"
+                              >
+                                <CopyIcon className="size-3" />
+                              </Button>
+                            }
+                          />
+                          <TooltipPopup side="top">Copy command</TooltipPopup>
+                        </Tooltip>
+                      </div>
+                    ) : null}
                   </div>
-                ) : null}
-                {codexRateLimitResetAvailabilityText ? (
-                  <p>{codexRateLimitResetAvailabilityText}</p>
-                ) : null}
-                {codexRateLimitResetText ? <p>{codexRateLimitResetText}</p> : null}
-              </div>
+                </PopoverPopup>
+              </Popover>
             ) : null}
+            {titleTailNode}
           </div>
-          <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
+          <div
+            className="flex min-w-0 flex-wrap items-center justify-end gap-2"
+            data-provider-card-actions
+          >
             {onLogIn ? (
               <Button
                 type="button"
@@ -1115,6 +1096,15 @@ export function ProviderInstanceCard({
                 )}
                 Log In
               </Button>
+            ) : null}
+            {/* Keep the optional reset alongside the existing controls. A
+                standalone quota action row would push all usage facts down
+                whenever a reset becomes available, leaving a blank strip. */}
+            {accountQuota ? (
+              <ProviderUsageResetButton
+                provider={liveProvider}
+                request={(input) => ensureLocalApi().server.usageReset(input)}
+              />
             ) : null}
             {onRestartRuntime ? (
               <Tooltip>
@@ -1201,6 +1191,17 @@ export function ProviderInstanceCard({
               aria-label={`Enable ${displayName}`}
             />
           </div>
+        </div>
+        {/* Details use the whole card independently of its header controls.
+            Reserve the quota scrollbar's gutter so longer bucket lists do
+            not change the available width and unexpectedly rewrap rows. */}
+        <div className="mt-2 min-w-0 space-y-2" data-provider-card-details>
+          {authRowNode}
+          {accountQuota ? (
+            <div className="w-full [&_[data-account-quota-scroll]]:[scrollbar-gutter:stable]">
+              <ProviderAccountQuotaDetails presentation={accountQuota} layout="settings" />
+            </div>
+          ) : null}
         </div>
       </div>
 

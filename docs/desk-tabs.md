@@ -1,0 +1,51 @@
+# Desk and chat tabs
+
+Use **Projects** to browse the existing project/chat catalog. Use **Desk** to
+show only your open chats, grouped the way you are working. Atrium, Settings,
+project actions and the chat composer stay in their usual places.
+
+- Open a chat from Projects or search to add/select its tab in the current group.
+- Drag tabs to reorder, into another group to move, or to a chat pane edge to
+  split. Hover the left or right half of a tab to see an insertion line before
+  or after it; empty tab-strip space appends. Tab-strip targets never show a
+  pane split preview. The group grip swaps group positions. Drag a divider to resize.
+  The highlighted half follows the nearest outer edge; the center adds the tab
+  to that group. Escape or dropping outside the workspace cancels the move.
+- Use a tab's right-click menu or the group's `…` button for close, close others,
+  close right, close all, reopen, split, move, merge and focus actions.
+- Dividers stop at usable pane sizes, including nested groups. Use the existing
+  focus/restore icon to expand one group and return to the split layout. Saved
+  ratios that no longer fit are adjusted for display without losing your layout
+  preference. If the window cannot fit all groups, the restore icon explains
+  that you need to enlarge the window; the split returns once there is room.
+- Click a sidebar row's pencil or press F2 on a tab/row to rename an existing chat.
+  Top tabs show only an always-visible close X; rename also remains in their
+  right-click menu. Click a pane's group name to rename the group.
+  In the Desk sidebar, hover or keyboard
+  focus a group heading to replace its count with a pencil; click the pencil or
+  press F2 to edit the name inline. Enter or clicking away saves, Escape cancels,
+  and clicking the heading normally still activates the group. New drafts gain
+  chat renaming after creation.
+  Project chat rows keep rename and archive together at the right edge; hover
+  or focus the row to reveal them (touch layouts show them directly).
+  Desk rows use the same selected-row styling and relative activity time as
+  Projects. Hover or keyboard focus replaces that time with rename/close buttons
+  without shifting the title (touch shows the actions directly). The pencil
+  edits the title inline: Enter or clicking away saves, Escape cancels.
+  Rename failures keep the edited text for retry; no modal interrupts the chat.
+- Use the chevron to search a group's open tabs. Arrow keys/Home/End navigate
+  a focused tab strip. Menus offer alternatives to dragging.
+- Pin task/context/quota information from its existing composer popover, or
+  choose **Pin session information** from a group's menu. Each group remembers
+  its own setting. Narrow panes retain the setting but use the popovers until
+  there is space; Focus group gives that chat more room.
+
+Closing tabs never deletes chats, stops agents, or discards draft/queued text.
+Reopen closed tab restores recent tabs. Desk layout is a preference on this
+client, saved separately for each connected primary environment. It does not
+move projects, copy chats, or synchronize a layout to another computer.
+
+Up to four panes can be visible; each can contain many tabs. Smaller windows
+show one group at a time with group-switching controls while retaining the saved
+split layout. Creating a chat still uses the existing project flow; this feature
+does not add projectless conversations.

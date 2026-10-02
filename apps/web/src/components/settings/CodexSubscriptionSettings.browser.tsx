@@ -70,8 +70,12 @@ async function mountCard(auth: ServerProvider["auth"]) {
 describe("Codex subscription labels in provider settings", () => {
   // The server owns tier interpretation. Both card layouts must retain its
   // label, including the email layout, which does not render summary.headline.
+  // Retain cached legacy labels until the server receives current plan metadata.
   it.each([
     "ChatGPT Plus Subscription",
+    "ChatGPT Pro Subscription",
+    "ChatGPT Pro (More) Subscription",
+    "ChatGPT Pro (Max) Subscription",
     "ChatGPT Pro 5x Subscription",
     "ChatGPT Pro 20x Subscription",
   ])("shows %s without requiring an account email", async (label) => {
@@ -82,6 +86,9 @@ describe("Codex subscription labels in provider settings", () => {
 
   it.each([
     "ChatGPT Plus Subscription",
+    "ChatGPT Pro Subscription",
+    "ChatGPT Pro (More) Subscription",
+    "ChatGPT Pro (Max) Subscription",
     "ChatGPT Pro 5x Subscription",
     "ChatGPT Pro 20x Subscription",
   ])("shows %s beside a still-redacted account email", async (label) => {
@@ -108,6 +115,6 @@ describe("Codex subscription labels in provider settings", () => {
   ])("does not invent a subscription tier for $label", async ({ type, label }) => {
     await mountCard({ status: "authenticated", type, label });
     await expect.element(page.getByText(`Authenticated · ${label}`, { exact: true })).toBeVisible();
-    await expect.element(page.getByText(/ChatGPT Pro (5x|20x)/)).not.toBeInTheDocument();
+    await expect.element(page.getByText(/ChatGPT Pro\b/)).not.toBeInTheDocument();
   });
 });

@@ -7,6 +7,8 @@ import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as Option from "effect/Option";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -37,6 +39,68 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       });
       return yield* spawner.spawn(command);
     });
+
+  it.effect("keeps typed account reads and both notification streams usable for new plans", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const client = yield* CodexClient.make(stdio);
+      const accountRead = yield* client.request("account/read", {}).pipe(Effect.forkScoped);
+      const request = decodeJson(yield* Queue.take(output)) as { id: number };
+      yield* Queue.offer(
+        input,
+        encodeJsonl({
+          id: request.id,
+          result: {
+            account: { type: "chatgpt", email: null, planType: "future_plan" },
+            requiresOpenaiAuth: true,
+          },
+        }),
+      );
+      assert.deepEqual(yield* Fiber.join(accountRead), {
+        account: { type: "chatgpt", email: null, planType: "unknown" },
+        requiresOpenaiAuth: true,
+      });
+
+      const quotaRead = yield* client
+        .request("account/rateLimits/read", undefined)
+        .pipe(Effect.forkScoped);
+      const quotaRequest = decodeJson(yield* Queue.take(output)) as { id: number };
+      yield* Queue.offer(
+        input,
+        encodeJsonl({
+          id: quotaRequest.id,
+          result: {
+            rateLimits: { planType: "future_plan" },
+            rateLimitsByLimitId: {
+              extra: { planType: "future_plan", primary: { usedPercent: 0 } },
+            },
+          },
+        }),
+      );
+      assert.deepEqual(yield* Fiber.join(quotaRead), {
+        rateLimits: { planType: "unknown" },
+        rateLimitsByLimitId: { extra: { planType: "unknown", primary: { usedPercent: 0 } } },
+      });
+
+      const typed = yield* Deferred.make<unknown>();
+      yield* client.handleServerNotification("account/rateLimits/updated", (payload) =>
+        Deferred.succeed(typed, payload),
+      );
+      const raw = yield* client.raw.notifications.pipe(Stream.runHead, Effect.forkScoped);
+      const params = { rateLimits: { planType: "future_plan", primary: { usedPercent: 12 } } };
+      yield* Queue.offer(
+        input,
+        encodeJsonl({ method: "account/rateLimits/updated", params, emittedAtMs: 123 }),
+      );
+      const expected = { rateLimits: { planType: "unknown", primary: { usedPercent: 12 } } };
+      assert.deepEqual(yield* Deferred.await(typed), expected);
+      assert.deepEqual(Option.getOrThrow(yield* Fiber.join(raw)), {
+        method: "account/rateLimits/updated",
+        params: expected,
+        emittedAtMs: 123,
+      });
+    }),
+  );
 
   it.effect("preserves optional Codex 0.154 usage-read capabilities on the typed wire", () =>
     Effect.gen(function* () {

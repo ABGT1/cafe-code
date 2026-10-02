@@ -22,6 +22,7 @@ import { formatElapsed, type WorkLogEntry } from "../../session-logic";
 import ChatMarkdown from "../ChatMarkdown";
 import { SubagentAvatar } from "../subagents/SubagentAvatar";
 import { cn } from "~/lib/utils";
+import { useChatPane } from "../../chatPaneContext";
 
 type SubagentWorkEntry = WorkLogEntry & {
   readonly subagent: NonNullable<WorkLogEntry["subagent"]>;
@@ -143,6 +144,7 @@ export function SubagentDetailView({
   backButtonRef,
   onBack,
 }: SubagentDetailViewProps) {
+  const pane = useChatPane();
   const { subagent } = selection.workEntry;
   const live = isLiveStatus(subagent.status);
   const now = useDetailNow(live);
@@ -159,12 +161,14 @@ export function SubagentDetailView({
   const [retryRevision, setRetryRevision] = useState(0);
 
   useEffect(() => {
+    if (!pane.active || !pane.visible) return;
     const frameId = window.requestAnimationFrame(() => backButtonRef.current?.focus());
     return () => window.cancelAnimationFrame(frameId);
-  }, [backButtonRef]);
+  }, [backButtonRef, pane.active, pane.visible]);
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (!pane.active || !pane.visible) return;
       if (event.key !== "Escape" || event.defaultPrevented) return;
       event.preventDefault();
       event.stopPropagation();
@@ -172,7 +176,7 @@ export function SubagentDetailView({
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [onBack]);
+  }, [onBack, pane.active, pane.visible]);
 
   useEffect(() => {
     if (!supportsSubagentTranscript(provider) || threadId === null || selection.turnId === null) {

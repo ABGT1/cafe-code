@@ -61,6 +61,9 @@ export function DesktopSessionDialog({
           className="space-y-5 overflow-y-auto px-6 pb-6"
           onSubmit={(event) => {
             event.preventDefault();
+            // React submit events bubble through the portal back to the
+            // composer's form. Saving desktop settings must never send its draft.
+            event.stopPropagation();
             if (!canSubmit || !resolution || controls.busy) return;
             void controls
               .change(

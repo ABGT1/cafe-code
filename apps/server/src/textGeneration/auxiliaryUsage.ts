@@ -66,13 +66,17 @@ export function readClaudeAuxiliaryUsage(
 }
 
 /**
- * `codex exec --json` exposes usage only on turn.completed. Upstream 0.153.4
+ * `codex exec --json` exposes usage only on turn.completed. Upstream 0.159.2
  * exec_events.rs and event_processor_with_jsonl_output.rs copy the thread's
  * total token counters there. Our ephemeral, non-resumed helper has one turn;
  * retain the last valid total once, never sum duplicates or item-level fields.
- * The exec event stream omits the effective model and rerouting notification,
- * so its model is unknown rather than assuming the requested model served it.
- * Source: https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/exec/src/event_processor_with_jsonl_output.rs
+ * The exec event stream omits authoritative effective-model attribution. It
+ * renders reroutes as generic error-item text and ignores model verification;
+ * neither identifies a model-specific share of the aggregate terminal total.
+ * Keep its model unknown, never infer it from requested settings or prose.
+ * Sources (immutable 0.159.2):
+ * https://github.com/openai/codex/blob/ff6aec96948b70d94983af2641a6b67c94faeff5/codex-rs/exec/src/exec_events.rs#L36-L68
+ * https://github.com/openai/codex/blob/ff6aec96948b70d94983af2641a6b67c94faeff5/codex-rs/exec/src/event_processor_with_jsonl_output.rs#L473-L514
  */
 export function makeCodexAuxiliaryUsageReader(scopeId: string) {
   let snapshot: UsageAccountingSnapshot | undefined;

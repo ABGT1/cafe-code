@@ -7,6 +7,7 @@ import {
 } from "../../pendingUserInput";
 import { CheckIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
+import { useChatPane } from "../../chatPaneContext";
 import {
   ComposerInteractionCard,
   type ComposerInteractionCallbacks,
@@ -86,6 +87,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   autoResolutionSnoozed: boolean;
   onSnoozeAutoResolution: () => void;
 }) {
+  const pane = useChatPane();
   const progress = derivePendingUserInputProgress(prompt.questions, answers, questionIndex);
   const activeQuestion = progress.activeQuestion;
   const autoAdvanceTimerRef = useRef<number | null>(null);
@@ -167,6 +169,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   useEffect(() => {
     if (!activeQuestion || isResponding) return;
     const handler = (event: globalThis.KeyboardEvent) => {
+      if (!pane.active || !pane.visible || event.defaultPrevented) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       const target = event.target;
       if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
@@ -189,7 +192,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [activeQuestion, isResponding]);
+  }, [activeQuestion, isResponding, pane.active, pane.visible]);
 
   if (!activeQuestion) {
     return null;

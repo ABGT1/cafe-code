@@ -98,6 +98,11 @@ import {
   resolveWorkspaceFilePath,
 } from "./MessagesTimeline.helpers";
 import {
+  rememberTimelineView,
+  resolveInitialTimelinePosition,
+  type TimelineViewPosition,
+} from "./timelineViewState";
+import {
   summarizeTimelineScrollMetrics,
   type TimelineScrollDebugEventInput,
   type TimelineScrollDebugListState,
@@ -203,6 +208,9 @@ interface MessagesTimelineProps {
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   stickToEndRevision: number;
   autoFollowTail: boolean;
+  initialViewPosition?: TimelineViewPosition | null;
+  viewPositionCache?: Map<string, TimelineViewPosition>;
+  viewPositionKey?: string;
   onIsAtEndChange: (isAtEnd: boolean) => void;
   onUserScrollIntent: () => void;
   onDebugScrollEvent?: (event: TimelineScrollDebugEventInput) => void;
@@ -240,6 +248,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   skills = EMPTY_TIMELINE_SKILLS,
   stickToEndRevision,
   autoFollowTail,
+  initialViewPosition = null,
+  viewPositionCache,
+  viewPositionKey,
   onIsAtEndChange,
   onUserScrollIntent,
   onDebugScrollEvent,
@@ -247,6 +258,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onOpenSubagentDetail: controlledOpenSubagentDetail,
   onCloseSubagentDetail: controlledCloseSubagentDetail,
 }: MessagesTimelineProps) {
+  const timelineElementRef = useRef<HTMLDivElement | null>(null);
   const activeThreadId = activeThreadIdProp ?? null;
   const chatCopyFormat = useSettings((settings) => settings.chatCopyFormat);
   const {
@@ -460,7 +472,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
       const range = selection.getRangeAt(0);
       const copyRegion = findAssistantMarkdownCopyRegion(range);
-      if (!copyRegion) {
+      if (!copyRegion || !timelineElementRef.current?.contains(copyRegion)) {
         return;
       }
 
@@ -600,10 +612,19 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   useEffect(() => {
     autoFollowTailRef.current = autoFollowTail;
+    // A user gesture changes follow mode after its scroll callback. Update the
+    // cached flag as well, otherwise a single scroll-away could be remembered
+    // as tail-following and jump to the bottom when the tab is reopened.
+    if (viewPositionCache && viewPositionKey) {
+      const previous = viewPositionCache.get(viewPositionKey);
+      if (previous && previous.following !== autoFollowTail) {
+        viewPositionCache.set(viewPositionKey, { ...previous, following: autoFollowTail });
+      }
+    }
     if (!autoFollowTail) {
       cancelTailFollowItemLayoutRepin();
     }
-  }, [autoFollowTail, cancelTailFollowItemLayoutRepin]);
+  }, [autoFollowTail, cancelTailFollowItemLayoutRepin, viewPositionCache, viewPositionKey]);
 
   const handleUserScrollIntent = useCallback(
     (event?: { readonly type?: string }) => {
@@ -639,6 +660,9 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
     const state = listRef.current?.getState?.();
     if (state) {
+      if (viewPositionCache && viewPositionKey) {
+        rememberTimelineView(viewPositionCache, viewPositionKey, state, autoFollowTailRef.current);
+      }
       const resolvedIsAtEnd = isTimelineScrolledToEnd(state);
       if (
         !resolvedIsAtEnd &&
@@ -668,6 +692,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     listRef,
     onIsAtEndChange,
     scheduleSubmitStickScrollEventRepin,
+    viewPositionCache,
+    viewPositionKey,
   ]);
   const handleWheel = useCallback(
     (event: ReactWheelEvent<HTMLElement>) => {
@@ -757,7 +783,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     const previousRowCount = previousRowCountRef.current;
     previousRowCountRef.current = rows.length;
 
-    if (previousRowCount > 0 || rows.length === 0) {
+    if (previousRowCount > 0 || rows.length === 0 || initialViewPosition?.following === false) {
       return;
     }
 
@@ -784,7 +810,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         window.cancelAnimationFrame(frameId);
       }
     };
-  }, [forceScrollToEnd, onIsAtEndChange, rows.length]);
+  }, [forceScrollToEnd, onIsAtEndChange, rows.length, initialViewPosition]);
 
   useEffect(() => {
     const frameId = window.requestAnimationFrame(() => {
@@ -950,7 +976,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   }
 
   return (
-    <div className="relative h-full min-h-0 min-w-0 overflow-hidden">
+    <div ref={timelineElementRef} className="relative h-full min-h-0 min-w-0 overflow-hidden">
       <TimelineRowCtx value={sharedState}>
         <TimelineRowActivityCtx value={activityState}>
           <div
@@ -967,7 +993,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
               keyExtractor={keyExtractor}
               renderItem={renderItem}
               estimatedItemSize={90}
-              initialScrollAtEnd
+              {...resolveInitialTimelinePosition(initialViewPosition, rows)}
               maintainScrollAtEnd={autoFollowTail}
               maintainScrollAtEndThreshold={TIMELINE_MAINTAIN_SCROLL_AT_END_THRESHOLD}
               maintainVisibleContentPosition={
@@ -1036,7 +1062,7 @@ function ThreadHistoryLoadingState() {
         <div className="relative mb-5 flex size-24 items-center justify-center" aria-hidden="true">
           <div className="absolute inset-1 rounded-full border border-primary/15 bg-gradient-to-br from-primary/10 via-card/20 to-cyan-400/10 shadow-[0_0_38px_rgba(56,189,248,0.12)]" />
           <div className="absolute inset-3 rounded-full border border-dashed border-foreground/15" />
-          <div className="absolute inset-0 animate-spin will-change-transform [animation-duration:5s] motion-reduce:animate-none">
+          <div className="absolute inset-0 animate-spin will-change-transform [--cafe-spin-duration:5s] [--cafe-spin-steps:300] motion-reduce:animate-none">
             <span className="absolute left-1/2 top-0 size-2.5 -translate-x-1/2 rounded-full bg-primary shadow-[0_0_12px_currentColor]" />
             <span className="absolute bottom-2 left-2.5 size-2 rounded-full bg-cyan-300/90 shadow-[0_0_10px_currentColor]" />
             <span className="absolute bottom-3 right-1.5 size-1.5 rounded-full bg-foreground/70" />

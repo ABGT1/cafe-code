@@ -107,8 +107,11 @@ export const SessionRail = memo(
           </div>
         </ScrollArea>
 
+        {/* Reserve part of this rail's actual allocation for its header/tasks,
+            even when a plan shares the side column. The min-height flex chain
+            shrinks only the quota list; reset availability stays below it. */}
         <div
-          className="shrink-0 border-t border-border/60 px-3 py-3"
+          className="flex max-h-[70%] min-h-0 shrink-0 flex-col border-t border-border/60 px-3 py-3"
           data-session-rail-usage="true"
         >
           <ContextWindowDetails

@@ -5,18 +5,23 @@ import type * as CodexSchema from "effect-codex-app-server/schema";
 // lightweight usage endpoint carries the same plan names as an open string;
 // never echo an unknown upstream value or infer a tier from quota percentages.
 // https://learn.chatgpt.com/docs/app-server#authentication-modes
+// Match Codex 0.160.0's account-status presentation. The Pro numerals are
+// provider-owned names, not quota multipliers, prices, or evidence of account
+// entitlement. Keep them as fixed display strings, with no billing inference.
+// https://github.com/openai/codex/blob/a956835d020762cb2b570053af06f643a11c0ecc/codex-rs/tui/src/subscription.rs#L12-L35
 const CODEX_SUBSCRIPTION_LABELS = {
   free: "ChatGPT Free Subscription",
   go: "ChatGPT Go Subscription",
   plus: "ChatGPT Plus Subscription",
-  pro: "ChatGPT Pro 20x Subscription",
-  prolite: "ChatGPT Pro 5x Subscription",
-  team: "ChatGPT Team Subscription",
-  self_serve_business_prolite: "ChatGPT Business ProLite Subscription",
+  pro: "ChatGPT Pro 200 Subscription",
+  prolite: "ChatGPT Pro 100 Subscription",
+  promax: "ChatGPT Pro 500 Subscription",
+  team: "ChatGPT Business Subscription",
+  self_serve_business_prolite: "ChatGPT Business Premium Subscription",
   self_serve_business_usage_based: "ChatGPT Business Subscription",
-  business: "ChatGPT Business Subscription",
+  business: "ChatGPT Enterprise Subscription",
   ent26: "ChatGPT Enterprise Subscription",
-  enterprise_cbp_automation: "ChatGPT Enterprise Subscription",
+  enterprise_cbp_automation: "ChatGPT Enterprise (Automation) Subscription",
   enterprise_cbp_usage_based: "ChatGPT Enterprise Subscription",
   enterprise: "ChatGPT Enterprise Subscription",
   edu: "ChatGPT Edu Subscription",

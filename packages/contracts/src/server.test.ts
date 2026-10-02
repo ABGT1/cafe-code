@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ServerProvider,
+  ServerProviderAccountRateLimitSnapshot,
   ServerProviderSandbox,
   ServerRuntimeLayerDiagnosticsResult,
 } from "./server.ts";
@@ -269,6 +270,7 @@ describe("ServerProvider", () => {
         },
         rateLimits: {
           limitId: "codex",
+          normalModelSlug: "gpt-6-astra",
           planType: "pro",
           primary: {
             usedPercent: 42.5,
@@ -284,18 +286,45 @@ describe("ServerProvider", () => {
         rateLimitsByLimitId: {
           codex: {
             limitId: "codex",
+            normalModelSlug: "gpt-6-astra",
             primary: {
               usedPercent: 42.5,
             },
+          },
+          reserve: {
+            limitId: "reserve",
+            normalModelSlug: null,
+            primary: { usedPercent: 0 },
+            credits: { hasCredits: false, unlimited: false, balance: "0" },
+            rateLimitReachedType: "rate_limit_reached",
           },
         },
       },
     });
 
     expect(parsed.accountRateLimits?.rateLimits.primary?.windowDurationMins).toBe(300);
+    expect(parsed.accountRateLimits?.rateLimits.normalModelSlug).toBe("gpt-6-astra");
+    expect(parsed.accountRateLimits?.rateLimitsByLimitId?.reserve).toEqual({
+      limitId: "reserve",
+      normalModelSlug: null,
+      primary: { usedPercent: 0 },
+      credits: { hasCredits: false, unlimited: false, balance: "0" },
+      rateLimitReachedType: "rate_limit_reached",
+    });
     expect(parsed.accountRateLimits?.rateLimitsByLimitId?.codex?.primary?.usedPercent).toBe(42.5);
     expect(parsed.accountRateLimits?.rateLimitResetCredits?.availableCount).toBe(2);
     expect(parsed.accountRateLimits?.rateLimitResetCredits?.credits?.[0]?.id).toBe("credit-1");
+  });
+
+  it("keeps quota model aliases optional, nullable and string-validated on the wire", () => {
+    const decode = Schema.decodeUnknownSync(ServerProviderAccountRateLimitSnapshot);
+    const encode = Schema.encodeSync(ServerProviderAccountRateLimitSnapshot);
+    for (const snapshot of [{}, { normalModelSlug: null }, { normalModelSlug: "gpt-5.6-luna" }]) {
+      expect(encode(decode(snapshot))).toEqual(snapshot);
+    }
+    for (const normalModelSlug of ["", "  ", 42, [], {}]) {
+      expect(() => decode({ normalModelSlug })).toThrow();
+    }
   });
 
   it("decodes lightweight runtime layer diagnostics", () => {

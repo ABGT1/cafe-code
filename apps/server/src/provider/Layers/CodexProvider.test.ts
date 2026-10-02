@@ -165,11 +165,12 @@ describe("Codex picker model/list refresh", () => {
   });
 
   it.each([
-    ["gpt-6-sol", "GPT-6-Sol", ["low", "medium", "high", "xhigh", "max", "ultra"]],
-    ["gpt-6-luna", "GPT-6-Luna", ["low", "medium", "high", "xhigh", "max"]],
+    ["gpt-6.1-sol", "GPT-6.1-Sol", ["low", "medium", "high", "xhigh", "max", "ultra"], "low"],
+    ["gpt-6-sol", "GPT-6-Sol", ["low", "medium", "high", "xhigh", "max", "ultra"], "medium"],
+    ["gpt-6-luna", "GPT-6-Luna", ["low", "medium", "high", "xhigh", "max"], "medium"],
   ] as const)(
     "provides %s fallback controls without replacing a live catalogue",
-    (slug, name, efforts) => {
+    (slug, name, efforts, defaultEffort) => {
       const fallback = fallbackCodexModelsFromSettings(
         decodeCodexSettings({ customModels: [slug] }),
       );
@@ -182,7 +183,7 @@ describe("Codex picker model/list refresh", () => {
       expect(
         reasoning?.type === "select" ? reasoning.options.map((option) => option.id) : undefined,
       ).toEqual(efforts);
-      expect(reasoning?.currentValue).toBe("medium");
+      expect(reasoning?.currentValue).toBe(defaultEffort);
       expect(row?.capabilities?.optionDescriptors).toContainEqual({
         id: "fastMode",
         label: "Fast Mode",
@@ -199,6 +200,48 @@ describe("Codex picker model/list refresh", () => {
       });
     },
   );
+
+  it("keeps live Sol 6.1 defaults and narrower backend controls authoritative", async () => {
+    const efforts = ["low", "medium", "high", "xhigh", "max"];
+    const client = makeModelListClient(() =>
+      Effect.succeed({
+        data: [
+          {
+            ...makeModel("gpt-6.1-sol"),
+            displayName: "GPT-6.1-Sol",
+            inputModalities: ["text", "image"],
+            supportedReasoningEfforts: efforts.map((reasoningEffort) => ({
+              reasoningEffort,
+              description: reasoningEffort,
+            })),
+            serviceTiers: [],
+            additionalSpeedTiers: [],
+          },
+        ],
+      }),
+    );
+
+    const discovered = await Effect.runPromise(requestAllCodexModelsWithClient(client));
+    const models = finalizeCodexModelListRefresh(discovered, ["gpt-6.1-sol"]);
+    expect(models).toEqual(discovered);
+    expect(models).toHaveLength(1);
+    expect(models?.[0]).toMatchObject({
+      slug: "gpt-6.1-sol",
+      name: "GPT-6.1-Sol",
+      isCustom: false,
+      capabilities: {
+        inputModalities: ["text", "image"],
+        optionDescriptors: [
+          {
+            id: "reasoningEffort",
+            currentValue: "medium",
+            options: efforts.map((id) => (id === "medium" ? { id, isDefault: true } : { id })),
+          },
+        ],
+      },
+    });
+    expect(models?.[0]?.capabilities?.optionDescriptors).toHaveLength(1);
+  });
 
   it("reads bounded cursor pages in provider order", async () => {
     const payloads: CodexSchema.V2ModelListParams[] = [];

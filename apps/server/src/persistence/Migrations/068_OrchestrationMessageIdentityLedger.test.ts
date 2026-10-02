@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
-import { it as vitestIt } from "vitest";
+import { expect, it as vitestIt } from "vitest";
 
 import {
   hydrateLegacyMessageIdentitiesForThread,
@@ -27,8 +27,57 @@ const SQLITE_WRITER_FIXTURE_GRACEFUL_EXIT_MS = 500;
 const SQLITE_WRITER_FIXTURE_FORCED_EXIT_MS = 5_000;
 const WINDOWS_CLEANUP_RETRY_DELAY_MS = 250;
 const WINDOWS_CLEANUP_RETRY_ATTEMPTS = 40;
+const HYDRATION_ORDERING_BUSY_TIMEOUT_MS = 1_000;
+// Both ordering fixtures deliberately keep the writer longer than the old
+// synchronous busy budget. Their terminal acknowledgement, not a short child
+// timer or a lucky scheduling interval, must permit the parent's first write.
+const SQLITE_WRITER_ORDERING_RELEASE_DELAY_MS = HYDRATION_ORDERING_BUSY_TIMEOUT_MS + 200;
 
 type ChildTermination = Promise<void>;
+
+interface SqliteWriterFixtureReplies {
+  readonly read: (phase: string) => Promise<string>;
+  readonly drain: () => Promise<void>;
+}
+
+function createSqliteWriterFixtureReplies(child: ChildProcess): SqliteWriterFixtureReplies {
+  const replies = new Set<Promise<string>>();
+  return {
+    read(phase) {
+      const reply = readSqliteWriterFixtureReply(child, phase);
+      replies.add(reply);
+      // Register an observer immediately: an assertion can fail between reply
+      // registration and its normal await, and cleanup then makes the child
+      // exit. Preserve the original rejecting promise so an awaited protocol
+      // failure still fails the test instead of being converted into success.
+      void reply.catch(() => undefined);
+      return reply;
+    },
+    async drain() {
+      // Cleanup may reject replies which the primary failure prevented us
+      // from awaiting. Drain those observers without replacing that primary
+      // assertion or protocol failure with a secondary child-exit error.
+      await Promise.allSettled(replies);
+    },
+  };
+}
+
+function startSqliteWriterFixture() {
+  const child = fork(
+    fileURLToPath(new URL("../../../test-fixtures/sqlite-writer-lock-child.mjs", import.meta.url)),
+    [],
+    {
+      execPath: process.execPath,
+      execArgv: [],
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+    },
+  );
+  return {
+    child,
+    termination: observeChildTermination(child),
+    replies: createSqliteWriterFixtureReplies(child),
+  };
+}
 
 function observeChildTermination(child: ChildProcess): ChildTermination {
   return new Promise<void>((resolve) => {
@@ -74,36 +123,41 @@ function waitForPromiseWithin(promise: Promise<void>, timeoutMs: number): Promis
 async function stopSqliteWriterFixture(
   child: ChildProcess,
   termination: ChildTermination,
+  replies: SqliteWriterFixtureReplies,
 ): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    await termination;
-    return;
-  }
-
-  // Closing IPC lets a healthy fixture close its DatabaseSync handle and exit
-  // without a signal. The fixture also installs a disconnect cleanup hook for
-  // failure paths where the expected command was never delivered.
-  if (child.connected) {
-    try {
-      child.disconnect();
-    } catch {
-      // A concurrent child-side disconnect is equivalent to the desired state.
+  try {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      await termination;
+      return;
     }
-  }
-  if (await waitForPromiseWithin(termination, SQLITE_WRITER_FIXTURE_GRACEFUL_EXIT_MS)) {
-    return;
-  }
 
-  if (child.exitCode === null && child.signalCode === null) {
-    child.kill("SIGKILL");
-  }
-  if (!(await waitForPromiseWithin(termination, SQLITE_WRITER_FIXTURE_FORCED_EXIT_MS))) {
-    throw new Error(
-      `SQLite writer fixture did not exit after forced termination ` +
-        `(pid=${String(child.pid)}, connected=${String(child.connected)}, ` +
-        `killed=${String(child.killed)}, exitCode=${String(child.exitCode)}, ` +
-        `signalCode=${String(child.signalCode)}).`,
-    );
+    // Closing IPC lets a healthy fixture close its DatabaseSync handle and exit
+    // without a signal. The fixture also installs a disconnect cleanup hook for
+    // failure paths where the expected command was never delivered.
+    if (child.connected) {
+      try {
+        child.disconnect();
+      } catch {
+        // A concurrent child-side disconnect is equivalent to the desired state.
+      }
+    }
+    if (await waitForPromiseWithin(termination, SQLITE_WRITER_FIXTURE_GRACEFUL_EXIT_MS)) {
+      return;
+    }
+
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+    }
+    if (!(await waitForPromiseWithin(termination, SQLITE_WRITER_FIXTURE_FORCED_EXIT_MS))) {
+      throw new Error(
+        `SQLite writer fixture did not exit after forced termination ` +
+          `(pid=${String(child.pid)}, connected=${String(child.connected)}, ` +
+          `killed=${String(child.killed)}, exitCode=${String(child.exitCode)}, ` +
+          `signalCode=${String(child.signalCode)}).`,
+      );
+    }
+  } finally {
+    await replies.drain();
   }
 }
 
@@ -540,7 +594,10 @@ const hydrationContentionSuffixes = {
   "writer-exhausted": "retry-exhausted",
 } as const satisfies Record<HydrationContentionScenario, string>;
 
-async function runHydrationContentionScenario(scenario: HydrationContentionScenario) {
+async function runHydrationContentionScenario(
+  scenario: HydrationContentionScenario,
+  options: { readonly readBeforeFirstCompactWrite?: boolean } = {},
+) {
   const directory = mkdtempSync(join(tmpdir(), "cafecode-identity-hydration-lock-"));
   const filename = join(directory, "state.sqlite");
   const suffix = hydrationContentionSuffixes[scenario];
@@ -614,24 +671,17 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
           // A separate process is required here: both Cafe runtimes own their
           // own node:sqlite connection, and the production failure occurs when
           // one process advances the WAL after the other's deferred read.
-          const lockOwner = fork(
-            fileURLToPath(
-              new URL("../../../test-fixtures/sqlite-writer-lock-child.mjs", import.meta.url),
-            ),
-            [],
-            {
-              execPath: process.execPath,
-              execArgv: [],
-              stdio: ["ignore", "ignore", "ignore", "ipc"],
-            },
-          );
-          const childTermination = observeChildTermination(lockOwner);
+          const {
+            child: lockOwner,
+            termination: childTermination,
+            replies,
+          } = startSqliteWriterFixture();
 
           // Keep the lifecycle guard immediately adjacent to `fork`. Setup,
           // readiness, assertions, and hydration can all fail independently;
           // none may leave an IPC child or SQLite handle behind.
           try {
-            const ready = readSqliteWriterFixtureReply(lockOwner, "startup");
+            const ready = replies.read("startup");
             lockOwner.send({ filename });
             assert.equal(yield* Effect.promise(() => ready), "ready");
 
@@ -691,16 +741,14 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
                 }
 
                 contentionIntercepted = true;
-                return Effect.promise(async () => {
+                const synchronizeWriter = Effect.promise(async () => {
                   if (scenario === "hydrate-then-purge") {
-                    const attempting = readSqliteWriterFixtureReply(
-                      lockOwner,
-                      "post-hydration retirement attempt",
-                    );
+                    const attempting = replies.read("post-hydration retirement attempt");
                     lockOwner.send({
                       type: "hold-write",
                       operation: "retire-thread",
                       holdMs: 250,
+                      releaseOnCommand: true,
                       announceAttempt: true,
                       threadId,
                       deletedAt: "2026-09-01T00:01:00.000Z",
@@ -709,20 +757,16 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
                     // Register before the parent watermark write and commit
                     // release SQLite's writer. The child cannot publish this
                     // reply until BEGIN IMMEDIATE has acquired that writer.
-                    writerLockReply = readSqliteWriterFixtureReply(
-                      lockOwner,
-                      "post-hydration retirement lock",
-                    );
+                    writerLockReply = replies.read("post-hydration retirement lock");
                     return;
                   }
 
-                  const locked = readSqliteWriterFixtureReply(lockOwner, "writer lock");
+                  const locked = replies.read("writer lock");
                   lockOwner.send({
                     type: "hold-write",
                     operation: scenario === "retire-thread" ? "retire-thread" : "write",
                     holdMs: scenario === "writer-exhausted" ? 500 : 50,
-                    releaseOnCommand:
-                      scenario === "writer-timeout" || scenario === "writer-exhausted",
+                    releaseOnCommand: true,
                     ...(scenario === "retire-thread"
                       ? {
                           threadId,
@@ -731,11 +775,42 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
                       : {}),
                   });
                   assert.equal(await locked, "locked");
-                  terminalWriterReply = readSqliteWriterFixtureReply(
-                    lockOwner,
+                  terminalWriterReply = replies.read(
                     scenario === "retire-thread" ? "thread retirement" : "WAL advance",
                   );
-                }).pipe(Effect.andThen(statement as Effect.Effect<unknown, unknown, unknown>));
+                  if (scenario === "advance-wal" || scenario === "retire-thread") {
+                    // Ordering-only cases need a committed WAL generation,
+                    // not an artificial busy timeout. In particular, a loaded
+                    // child can miss a 50 ms timer by more than the parent's
+                    // 1 s timeout. Delay release beyond that old budget, then
+                    // require the terminal IPC acknowledgement before the
+                    // intercepted first INSERT executes. This remains inside
+                    // the parent's transaction: a preceding SELECT would pin
+                    // a stale snapshot and still fail its read-to-write upgrade.
+                    await new Promise((resolve) =>
+                      setTimeout(resolve, SQLITE_WRITER_ORDERING_RELEASE_DELAY_MS),
+                    );
+                    lockOwner.send({ type: "release-write" });
+                    assert.equal(
+                      await terminalWriterReply,
+                      scenario === "retire-thread" ? "retired" : "committed",
+                    );
+                  }
+                });
+
+                // The negative control deliberately pins a real table read
+                // before the child commits. Compose it into the current Effect
+                // transaction instead of creating a separate runPromise/sql
+                // context, which would lose the very snapshot being tested.
+                const synchronizedWrite =
+                  options.readBeforeFirstCompactWrite === true && isIdentityWrite
+                    ? sql`SELECT value FROM cafe_snapshot_retry_probe LIMIT 1`.pipe(
+                        Effect.andThen(synchronizeWriter),
+                      )
+                    : synchronizeWriter;
+                return synchronizedWrite.pipe(
+                  Effect.andThen(statement as Effect.Effect<unknown, unknown, unknown>),
+                );
               },
             }) as unknown as SqlClient.SqlClient;
 
@@ -756,15 +831,16 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
               yield* hydrateLegacyMessageIdentitiesForThread(contendedSql, threadId);
             }
             assert.isTrue(contentionIntercepted);
-            // A transaction that reads before this first compact write fails
-            // immediately with native SQLITE_BUSY while the child owns the WAL
-            // writer. The production write-first transaction waits and finishes
-            // in one attempt when the lock fits inside busy_timeout. The
+            // A transaction that reads before the child commits fails its
+            // first compact write with native SQLITE_BUSY_SNAPSHOT even after
+            // the terminal acknowledgement releases the child's writer. The
+            // production write-first transaction finishes in one attempt. The
             // writer-timeout scenario deliberately exceeds that tiny test
             // timeout and proves that only the idempotent page is retried.
             assert.equal(
               compactWriteAttemptCount,
               scenario === "writer-exhausted" ? 3 : scenario === "writer-timeout" ? 2 : 1,
+              "Unexpected compact identity write attempt count.",
             );
 
             if (scenario === "hydrate-then-purge") {
@@ -775,10 +851,7 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
                 }),
                 "locked",
               );
-              terminalWriterReply = readSqliteWriterFixtureReply(
-                lockOwner,
-                "post-hydration thread retirement",
-              );
+              terminalWriterReply = replies.read("post-hydration thread retirement");
 
               // While the child owns the later, still-uncommitted tombstone
               // transaction, WAL readers must already observe both rows from
@@ -811,6 +884,10 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
               ]);
               assert.equal(committedHydration?.throughSequence, state!.cutoff);
               assert.equal(committedTombstone?.count, 0);
+              // Keep retirement uncommitted until these WAL-reader assertions
+              // have actually run. A short child timer could otherwise commit
+              // the tombstone before a loaded parent observes the locked reply.
+              lockOwner.send({ type: "release-write" });
             }
 
             if (scenario === "writer-exhausted") {
@@ -901,14 +978,18 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
               assert.equal(tombstone?.count, 0);
             }
           } finally {
-            yield* Effect.promise(() => stopSqliteWriterFixture(lockOwner, childTermination));
+            yield* Effect.promise(() =>
+              stopSqliteWriterFixture(lockOwner, childTermination, replies),
+            );
           }
         }).pipe(
           Effect.provide(
             NodeSqliteClient.layer({
               filename,
               busyTimeoutMs:
-                scenario === "writer-timeout" || scenario === "writer-exhausted" ? 25 : 1_000,
+                scenario === "writer-timeout" || scenario === "writer-exhausted"
+                  ? 25
+                  : HYDRATION_ORDERING_BUSY_TIMEOUT_MS,
             }),
           ),
         ),
@@ -925,14 +1006,84 @@ async function runHydrationContentionScenario(scenario: HydrationContentionScena
 const HYDRATION_CONTENTION_TEST_TIMEOUT_MS = process.platform === "win32" ? 40_000 : 25_000;
 
 vitestIt(
-  "admits a legacy hydration page without a deferred read-to-write upgrade",
+  "admits a legacy hydration page after a writer release delayed beyond the busy budget",
   () => runHydrationContentionScenario("advance-wal"),
   HYDRATION_CONTENTION_TEST_TIMEOUT_MS,
 );
 
 vitestIt(
-  "honors a permanent tombstone committed before the first compact write",
+  "honors a permanent tombstone after retirement delayed beyond the busy budget",
   () => runHydrationContentionScenario("retire-thread"),
+  HYDRATION_CONTENTION_TEST_TIMEOUT_MS,
+);
+
+vitestIt(
+  "detects a deferred snapshot upgrade even after awaiting the writer's commit",
+  async () => {
+    await expect(
+      runHydrationContentionScenario("advance-wal", { readBeforeFirstCompactWrite: true }),
+    ).rejects.toThrow(/Unexpected compact identity write attempt count.*expected 2 to equal 1/);
+  },
+  HYDRATION_CONTENTION_TEST_TIMEOUT_MS,
+);
+
+vitestIt(
+  "drains a pending child reply without hiding the primary assertion failure",
+  async () => {
+    const directory = mkdtempSync(join(tmpdir(), "cafecode-identity-fixture-failure-"));
+    const { child, termination, replies } = startSqliteWriterFixture();
+    const unhandledRejections: unknown[] = [];
+    const onUnhandledRejection = (reason: unknown) => {
+      unhandledRejections.push(reason);
+    };
+    try {
+      process.on("unhandledRejection", onUnhandledRejection);
+      let primaryFailure: unknown;
+      let pendingReply: Promise<string> | undefined;
+      const guardedFailure = async () => {
+        try {
+          const ready = replies.read("failure-cleanup startup");
+          child.send({ filename: join(directory, "state.sqlite") });
+          assert.equal(await ready, "ready");
+
+          // No terminal command is sent. The deliberate assertion failure
+          // leaves this reply pending, and cleanup must reject it on the real
+          // child's exit without producing an unhandled rejection first.
+          pendingReply = replies.read("primary assertion failure cleanup");
+          assert.fail("Injected primary fixture assertion failure.");
+        } catch (error) {
+          primaryFailure = error;
+          throw error;
+        } finally {
+          await stopSqliteWriterFixture(child, termination, replies);
+        }
+      };
+      const actualFailure = await guardedFailure().catch((error: unknown) => error);
+      assert.ok(actualFailure instanceof Error);
+      assert.strictEqual(actualFailure, primaryFailure);
+      assert.match(actualFailure.message, /Injected primary fixture assertion failure/);
+      assert.ok(pendingReply);
+      // The immediate observer must retain the original rejecting promise:
+      // normal callers still see the concrete protocol failure when awaiting.
+      await expect(pendingReply).rejects.toThrow(
+        /SQLite writer fixture exited during primary assertion failure cleanup/,
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.deepStrictEqual(unhandledRejections, []);
+      assert.equal(child.connected, false);
+      // A loaded runner may need the existing bounded forced-exit backstop.
+      // Prove the process was reaped without assuming it received its normal
+      // disconnect cleanup within the short graceful interval.
+      assert.isTrue(child.exitCode !== null || child.signalCode !== null);
+    } finally {
+      process.off("unhandledRejection", onUnhandledRejection);
+      try {
+        await stopSqliteWriterFixture(child, termination, replies);
+      } finally {
+        await removeTemporaryDirectory(directory);
+      }
+    }
+  },
   HYDRATION_CONTENTION_TEST_TIMEOUT_MS,
 );
 

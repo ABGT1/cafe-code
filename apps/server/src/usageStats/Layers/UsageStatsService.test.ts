@@ -388,6 +388,37 @@ describe("UsageStatsService", () => {
       }),
     ),
   );
+  it.effect("retains unreported helper model counts exactly once across replay and rebuild", () =>
+    withHarness((harness) =>
+      Effect.gen(function* () {
+        const snapshot: UsageAccountingSnapshot = {
+          scopeId: "90000000-0000-4000-8000-000000000001",
+          revision: 1,
+          completeness: "complete",
+          models: [
+            {
+              ...accountingModel(20_511, 16, 0, "unknown"),
+              cachedInputTokens: 9_984,
+            },
+          ],
+        };
+        yield* harness.recordAuxiliary(CODEX, snapshot, 0);
+        yield* harness.recordAuxiliary(CODEX, snapshot, 0);
+        // A missing model is missing attribution, not missing numeric usage.
+        // Rebuilding must keep both the tiny output and its much larger input
+        // without assigning the helper's requested model or charging a replay.
+        const rebuilt = yield* harness.rebuildService;
+        yield* rebuilt.recordAccounting(CODEX, snapshot, 0);
+        const result = yield* rebuilt.get;
+        assert.equal(result.totals.inputTokens, 20_511);
+        assert.equal(result.totals.cachedInputTokens, 9_984);
+        assert.equal(result.totals.outputTokens, 16);
+        assert.equal(result.tokenBreakdown.length, 1);
+        assert.deepEqual(result.tokenBreakdown[0], { ...snapshot.models[0], provider: CODEX });
+        assert.equal((yield* harness.repository.listDays)[0]?.outputTokens, 16);
+      }),
+    ),
+  );
   it.effect(
     "keeps per-day billing models through delayed replay/rebuild and excludes them from hot snapshots",
     () =>

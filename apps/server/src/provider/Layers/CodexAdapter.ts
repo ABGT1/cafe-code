@@ -51,6 +51,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -85,6 +86,7 @@ import {
   type ProviderSubagentPublicMessageInput,
 } from "../subagentDetail.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import { normalizeCodexAccountPlanPayload } from "effect-codex-app-server/compatibility";
 import {
   appendFileAttachmentPrompt,
   prepareFileAttachmentPrompt,
@@ -286,6 +288,16 @@ type CodexToolUserInputQuestion =
 const ApprovalDecisionPayload = Schema.Struct({
   decision: ProviderApprovalDecision,
 });
+
+// Account notifications also enter persisted canonical events. Decode instead
+// of merely testing the schema so undeclared provider metadata cannot survive
+// in either the public projection or its retained rawPayload envelope.
+const decodeAccountUpdated = Schema.decodeUnknownOption(
+  EffectCodexSchema.V2AccountUpdatedNotification,
+);
+const decodeAccountRateLimitsUpdated = Schema.decodeUnknownOption(
+  EffectCodexSchema.V2AccountRateLimitsUpdatedNotification,
+);
 
 function readPayload<A>(
   schema: Schema.Schema<A>,
@@ -3670,30 +3682,36 @@ function mapToRuntimeEvents(
   }
 
   if (event.method === "account/updated") {
-    if (!readPayload(EffectCodexSchema.V2AccountUpdatedNotification, event.payload)) {
+    const payload = Option.getOrUndefined(
+      decodeAccountUpdated(normalizeCodexAccountPlanPayload(event.method, event.payload)),
+    );
+    if (!payload) {
       return [];
     }
     return [
       {
         type: "account.updated",
-        ...runtimeEventBase(event, canonicalThreadId),
+        ...runtimeEventBase(event, canonicalThreadId, { rawPayload: payload }),
         payload: {
-          account: event.payload ?? {},
+          account: payload,
         },
       },
     ];
   }
 
   if (event.method === "account/rateLimits/updated") {
-    if (!readPayload(EffectCodexSchema.V2AccountRateLimitsUpdatedNotification, event.payload)) {
+    const payload = Option.getOrUndefined(
+      decodeAccountRateLimitsUpdated(normalizeCodexAccountPlanPayload(event.method, event.payload)),
+    );
+    if (!payload) {
       return [];
     }
     return [
       {
         type: "account.rate-limits.updated",
-        ...runtimeEventBase(event, canonicalThreadId),
+        ...runtimeEventBase(event, canonicalThreadId, { rawPayload: payload }),
         payload: {
-          rateLimits: event.payload ?? {},
+          rateLimits: payload,
         },
       },
     ];

@@ -190,12 +190,16 @@ const CLAUDE_SUBAGENT_HISTORY_READ_TIMEOUT_MS = 15_000;
 const CLAUDE_SUBAGENT_HISTORY_FILE_MAX_BYTES = 256 * 1024 * 1024;
 const CLAUDE_SUBAGENT_HISTORY_METADATA_MAX_BYTES = 64 * 1024;
 
-function runtimeModeToClaudePermissionMode(runtimeMode: RuntimeMode): PermissionMode | undefined {
+function runtimeModeToClaudePermissionMode(runtimeMode: RuntimeMode): PermissionMode {
   switch (runtimeMode) {
     case "approval-required":
-      // Omitting the initial flag lets Claude Code use its standard/manual
-      // permission behavior and matches the Agent SDK's documented default.
-      return undefined;
+      // SDK 0.3.286 stopped inserting `default` when this option is absent:
+      // omission now inherits native settings and can start in classifier-backed
+      // Auto mode. Cafe's Manual selection is an explicit approval policy, so
+      // bind it at query creation (including resumes), rather than relying on
+      // native defaults or sending a pre-prompt setPermissionMode() request.
+      // https://github.com/anthropics/claude-agent-sdk-typescript/blob/9d8cb9c1ae68672c343d75723440b73afe5b993c/CHANGELOG.md
+      return "default";
     case "auto-accept-edits":
       return "acceptEdits";
     case "full-access":

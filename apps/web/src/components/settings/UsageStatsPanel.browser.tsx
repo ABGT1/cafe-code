@@ -3,20 +3,34 @@ import "../../index.css";
 import { page } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "vitest-browser-react";
-import { ProviderDriverKind, type UsageStatsGetResult } from "@cafecode/contracts";
+import {
+  ProviderDriverKind,
+  type UsageStatsDay,
+  type UsageStatsGetResult,
+  type UsageStatsTokenBreakdownEntry,
+  type UsageStatsTotals,
+} from "@cafecode/contracts";
 
+import { applyInterfaceScalePercent } from "../../interfaceScale";
+import { resetUsageStatsDetailResourceForTests } from "../stats/usageStatsDetailResource";
 import { UsageCostContent } from "./UsageCostSection";
 import { UsageStatsPanel } from "./UsageStatsPanel";
 
 const usageHarness = vi.hoisted(() => {
   let detail: unknown;
   let snapshot: unknown;
+  const snapshotListeners = new Set<(event: unknown) => void>();
+  const connectionListeners = new Set<(event: { reconnected: boolean }) => void>();
   const updateSettings = vi.fn();
   const getUsageStats = vi.fn(async () => detail);
-  const subscribeConnectionOpened = vi.fn(() => () => undefined);
+  const subscribeConnectionOpened = vi.fn((listener: (event: { reconnected: boolean }) => void) => {
+    connectionListeners.add(listener);
+    return () => connectionListeners.delete(listener);
+  });
   const subscribeUsageStats = vi.fn((nextListener: (event: unknown) => void) => {
+    snapshotListeners.add(nextListener);
     nextListener(snapshot);
-    return () => undefined;
+    return () => snapshotListeners.delete(nextListener);
   });
 
   return {
@@ -31,6 +45,16 @@ const usageHarness = vi.hoisted(() => {
       getUsageStats.mockClear();
       subscribeConnectionOpened.mockClear();
       subscribeUsageStats.mockClear();
+      snapshotListeners.clear();
+      connectionListeners.clear();
+    },
+    emitSnapshot(nextSnapshot: unknown) {
+      snapshot = nextSnapshot;
+      for (const listener of snapshotListeners) listener(snapshot);
+    },
+    refreshDetail(nextDetail: unknown) {
+      detail = nextDetail;
+      for (const listener of connectionListeners) listener({ reconnected: true });
     },
   };
 });
@@ -88,39 +112,277 @@ const snapshot = {
 };
 
 function createUsageDetail(): UsageStatsGetResult {
+  // This fixture represents one recorded day. Its ledger and daily model
+  // rows must carry the same counts as the aggregate so the default 30-day
+  // view does not accidentally exercise the old lifetime-only behavior.
+  const today = { ...snapshot.today, ...totals };
+  const tokenBreakdown = [
+    {
+      provider: "codex",
+      model: "gpt-5.6-codex",
+      inputTokens: 1_500_000,
+      cachedInputTokens: 750_000,
+      cacheWriteInputTokens: 100_000,
+      outputTokens: 100_000,
+      reasoningOutputTokens: 20_000,
+    },
+    {
+      provider: "codex",
+      model: "gpt-5.6-codex-mini",
+      inputTokens: 500_000,
+      cachedInputTokens: 250_000,
+      cacheWriteInputTokens: 50_000,
+      outputTokens: 25_000,
+      reasoningOutputTokens: 5_000,
+    },
+    {
+      provider: "claudeAgent",
+      model: "claude-opus-5",
+      inputTokens: 750_000,
+      cachedInputTokens: 250_000,
+      cacheWriteInputTokens: 100_000,
+      outputTokens: 75_000,
+      reasoningOutputTokens: 25_000,
+    },
+  ];
   return {
     ...snapshot,
-    days: [snapshot.today],
-    tokenBreakdown: [
-      {
-        provider: "codex",
-        model: "gpt-5.6-codex",
-        inputTokens: 1_500_000,
-        cachedInputTokens: 750_000,
-        cacheWriteInputTokens: 100_000,
-        outputTokens: 100_000,
-        reasoningOutputTokens: 20_000,
-      },
-      {
-        provider: "codex",
-        model: "gpt-5.6-codex-mini",
-        inputTokens: 500_000,
-        cachedInputTokens: 250_000,
-        cacheWriteInputTokens: 50_000,
-        outputTokens: 25_000,
-        reasoningOutputTokens: 5_000,
-      },
-      {
-        provider: "claudeAgent",
-        model: "claude-opus-5",
-        inputTokens: 750_000,
-        cachedInputTokens: 250_000,
-        cacheWriteInputTokens: 100_000,
-        outputTokens: 75_000,
-        reasoningOutputTokens: 25_000,
-      },
-    ],
+    today,
+    days: [today],
+    tokenBreakdown,
+    tokenBreakdownDays: tokenBreakdown.map((entry) => ({ ...entry, day: today.day })),
   } as unknown as UsageStatsGetResult;
+}
+
+const emptyTotals: UsageStatsTotals = {
+  generatingMs: 0,
+  inputTokens: 0,
+  cachedInputTokens: 0,
+  cacheWriteInputTokens: 0,
+  outputTokens: 0,
+  reasoningOutputTokens: 0,
+  userMessages: 0,
+};
+
+function sumTotals(rows: ReadonlyArray<UsageStatsTotals>): UsageStatsTotals {
+  return rows.reduce(
+    (sum, row) => ({
+      generatingMs: sum.generatingMs + row.generatingMs,
+      inputTokens: sum.inputTokens + row.inputTokens,
+      cachedInputTokens: sum.cachedInputTokens + row.cachedInputTokens,
+      cacheWriteInputTokens: sum.cacheWriteInputTokens + row.cacheWriteInputTokens,
+      outputTokens: sum.outputTokens + row.outputTokens,
+      reasoningOutputTokens: sum.reasoningOutputTokens + row.reasoningOutputTokens,
+      userMessages: sum.userMessages + row.userMessages,
+    }),
+    emptyTotals,
+  );
+}
+
+/**
+ * Boundary days have distinct providers and cache/output proportions. The
+ * absent calendar days are intentional: a range is a calendar interval,
+ * never the last N stored rows. July 20 also has real unattributed traffic,
+ * while the lifetime-only Grok row predates the daily attribution ledger.
+ */
+function createRangeUsageDetail(): UsageStatsGetResult {
+  const attributedDays = [
+    {
+      day: "2026-04-22",
+      provider: "codex",
+      model: "gpt-4o",
+      inputTokens: 1_000_000,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 100_000,
+      reasoningOutputTokens: 70_000,
+      generatingMs: 420_000,
+      userMessages: 7,
+    },
+    {
+      day: "2026-04-23",
+      provider: "codex",
+      model: "gpt-4.1",
+      inputTokens: 1_000_000,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 100_000,
+      reasoningOutputTokens: 60_000,
+      generatingMs: 360_000,
+      userMessages: 6,
+    },
+    {
+      day: "2026-06-21",
+      provider: "opencode",
+      model: "unknown-local-model",
+      inputTokens: 1_000_000,
+      cachedInputTokens: 250_000,
+      cacheWriteInputTokens: 0,
+      outputTokens: 100_000,
+      reasoningOutputTokens: 50_000,
+      generatingMs: 300_000,
+      userMessages: 5,
+    },
+    {
+      day: "2026-06-22",
+      provider: "claudeAgent",
+      model: "claude-opus-5",
+      inputTokens: 1_000_000,
+      cachedInputTokens: 500_000,
+      cacheWriteInputTokens: 100_000,
+      outputTokens: 100_000,
+      reasoningOutputTokens: 40_000,
+      generatingMs: 240_000,
+      userMessages: 4,
+    },
+    {
+      day: "2026-07-14",
+      provider: "claudeAgent",
+      model: "claude-opus-5",
+      inputTokens: 2_000_000,
+      cachedInputTokens: 1_000_000,
+      cacheWriteInputTokens: 0,
+      outputTokens: 200_000,
+      reasoningOutputTokens: 30_000,
+      generatingMs: 180_000,
+      userMessages: 3,
+    },
+    {
+      day: "2026-07-15",
+      provider: "codex",
+      model: "gpt-5.6-codex",
+      inputTokens: 1_000_000,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 100_000,
+      reasoningOutputTokens: 20_000,
+      generatingMs: 120_000,
+      userMessages: 2,
+    },
+    {
+      day: "2026-07-21",
+      provider: "codex",
+      model: "gpt-5.6-codex",
+      inputTokens: 1_000_000,
+      cachedInputTokens: 500_000,
+      cacheWriteInputTokens: 100_000,
+      outputTokens: 100_000,
+      reasoningOutputTokens: 10_000,
+      generatingMs: 60_000,
+      userMessages: 1,
+    },
+  ];
+  const days: UsageStatsDay[] = attributedDays.map(
+    ({ provider: _provider, model: _model, ...day }) => day,
+  );
+  days.splice(6, 0, {
+    ...emptyTotals,
+    day: "2026-07-20",
+    inputTokens: 500_000,
+    outputTokens: 50_000,
+    reasoningOutputTokens: 5_000,
+    generatingMs: 30_000,
+    userMessages: 1,
+  });
+  const tokenBreakdownDays = attributedDays.map(
+    ({ generatingMs: _time, userMessages: _messages, ...entry }) => ({
+      ...entry,
+      provider: ProviderDriverKind.make(entry.provider),
+    }),
+  );
+  const lifetimeOnly = {
+    ...emptyTotals,
+    inputTokens: 750_000,
+    outputTokens: 75_000,
+    reasoningOutputTokens: 7_500,
+    generatingMs: 450_000,
+    userMessages: 8,
+  };
+  const lifetimeByModel = new Map<string, UsageStatsTokenBreakdownEntry>();
+  for (const { day: _day, ...entry } of tokenBreakdownDays) {
+    const key = `${entry.provider}:${entry.model}`;
+    const previous = lifetimeByModel.get(key);
+    lifetimeByModel.set(
+      key,
+      previous
+        ? {
+            ...entry,
+            inputTokens: previous.inputTokens + entry.inputTokens,
+            cachedInputTokens: previous.cachedInputTokens + entry.cachedInputTokens,
+            cacheWriteInputTokens: previous.cacheWriteInputTokens + entry.cacheWriteInputTokens,
+            outputTokens: previous.outputTokens + entry.outputTokens,
+            reasoningOutputTokens: previous.reasoningOutputTokens + entry.reasoningOutputTokens,
+          }
+        : entry,
+    );
+  }
+  const tokenBreakdown = [...lifetimeByModel.values()];
+  tokenBreakdown.push({
+    provider: ProviderDriverKind.make("grok"),
+    model: "grok-legacy-model",
+    inputTokens: 500_000,
+    cachedInputTokens: 0,
+    cacheWriteInputTokens: 0,
+    outputTokens: 50_000,
+    reasoningOutputTokens: 5_000,
+  });
+  return {
+    ...snapshot,
+    totals: sumTotals([...days, lifetimeOnly]),
+    today: days.at(-1)!,
+    days,
+    tokenBreakdown,
+    tokenBreakdownDays,
+  };
+}
+
+/** Synthetic long-running usage keeps the layout checks independent of providers. */
+function createBillionScaleUsageDetail(): UsageStatsGetResult {
+  const baseline = createUsageDetail();
+  const scale = 1_000;
+  const scaledToday = {
+    ...baseline.today,
+    generatingMs: baseline.today.generatingMs * scale,
+    inputTokens: baseline.today.inputTokens * scale,
+    cachedInputTokens: baseline.today.cachedInputTokens * scale,
+    cacheWriteInputTokens: baseline.today.cacheWriteInputTokens * scale,
+    outputTokens: baseline.today.outputTokens * scale,
+    reasoningOutputTokens: baseline.today.reasoningOutputTokens * scale,
+    userMessages: baseline.today.userMessages * scale,
+  };
+  return {
+    ...baseline,
+    totals: {
+      generatingMs: baseline.totals.generatingMs * scale,
+      inputTokens: baseline.totals.inputTokens * scale,
+      cachedInputTokens: baseline.totals.cachedInputTokens * scale,
+      cacheWriteInputTokens: baseline.totals.cacheWriteInputTokens * scale,
+      outputTokens: baseline.totals.outputTokens * scale,
+      reasoningOutputTokens: baseline.totals.reasoningOutputTokens * scale,
+      userMessages: baseline.totals.userMessages * scale,
+    },
+    today: scaledToday,
+    days: Array.from({ length: 7 }, (_, index) => ({
+      ...(index === 6 ? scaledToday : emptyTotals),
+      day: `2026-07-${15 + index}` as typeof scaledToday.day,
+    })),
+    tokenBreakdown: baseline.tokenBreakdown.map((entry) => ({
+      ...entry,
+      inputTokens: entry.inputTokens * scale,
+      cachedInputTokens: entry.cachedInputTokens * scale,
+      cacheWriteInputTokens: entry.cacheWriteInputTokens * scale,
+      outputTokens: entry.outputTokens * scale,
+      reasoningOutputTokens: entry.reasoningOutputTokens * scale,
+    })),
+    tokenBreakdownDays: baseline.tokenBreakdownDays?.map((entry) => ({
+      ...entry,
+      inputTokens: entry.inputTokens * scale,
+      cachedInputTokens: entry.cachedInputTokens * scale,
+      cacheWriteInputTokens: entry.cacheWriteInputTokens * scale,
+      outputTokens: entry.outputTokens * scale,
+      reasoningOutputTokens: entry.reasoningOutputTokens * scale,
+    })),
+  };
 }
 
 function requiredElement(selector: string): HTMLElement {
@@ -136,6 +398,203 @@ function displayedRawCount(id: string): number {
   return Number(numeric!.replaceAll(",", ""));
 }
 
+function overviewValue(label: string): string | null {
+  return page.getByText(label, { exact: true }).element().nextElementSibling?.textContent ?? null;
+}
+
+function costQualityValue(label: string): string | null {
+  const term = Array.from(document.querySelectorAll("dt")).find(
+    (entry) => entry.textContent === label,
+  );
+  expect(term).toBeDefined();
+  return term!.nextElementSibling?.textContent ?? null;
+}
+
+function providerCostRows() {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>("[data-usage-provider-cost-value]"),
+    (cost) => {
+      const heading = cost.parentElement!;
+      return {
+        provider: heading.firstElementChild!.lastElementChild!.textContent,
+        cost: cost.textContent,
+        tokens: heading.parentElement!.querySelector("[data-usage-token-full='provider']")!
+          .textContent,
+      };
+    },
+  ).toSorted((left, right) => (left.provider ?? "").localeCompare(right.provider ?? ""));
+}
+
+function modelCostRows() {
+  return Array.from(
+    document.querySelectorAll<HTMLElement>("[data-usage-model-cost-value]"),
+    (cost) => {
+      const row = cost.closest("tr")!;
+      return {
+        model: row.firstElementChild!.textContent,
+        cost: cost.textContent,
+        tokens: row.querySelector("[data-usage-token-full='model']")!.textContent,
+      };
+    },
+  ).toSorted((left, right) => (left.model ?? "").localeCompare(right.model ?? ""));
+}
+
+function activeActivityCellCount(): number {
+  const heatmap = requiredElement('[role="img"][aria-label^="Daily generating time"]');
+  return Array.from(heatmap.querySelectorAll<HTMLElement>("div[style]")).filter((cell) =>
+    cell.style.backgroundColor.includes("--color-primary"),
+  ).length;
+}
+
+async function hoverActivityCell(day: string): Promise<HTMLElement> {
+  requiredElement(`[data-activity-day="${day}"][data-activity-in-range="true"]`).dispatchEvent(
+    new PointerEvent("pointerover", { bubbles: true }),
+  );
+  await vi.waitFor(() =>
+    expect(requiredElement('[role="tooltip"]').getAttribute("data-activity-tooltip-day")).toBe(day),
+  );
+  return requiredElement('[role="tooltip"]');
+}
+
+const rangeExpectations = {
+  "7 days": {
+    cost: "$3.94 USD*",
+    processed: 2_750_000,
+    cached: 500_000,
+    uncached: 1_900_000,
+    output: 250_000,
+    reasoning: "35,000 reasoning tokens",
+    cachePercent: "20.0% of input",
+    cacheSavings: "$0.56 USD",
+    priced: "80.0%",
+    unpriced: "20.0%",
+    chats: "4",
+    time: "3m 30s",
+    attributed: "200,000 attributed",
+    activityDays: 8,
+    providers: [{ provider: "Codex", cost: "$3.94 USD", tokens: "2,200,000 tokens" }],
+    models: [{ model: "gpt-5.6-codex", cost: "$3.94 USD", tokens: "2,200,000" }],
+  },
+  "30 days": {
+    cost: "$19.81 USD*",
+    processed: 6_050_000,
+    cached: 2_000_000,
+    uncached: 3_300_000,
+    output: 550_000,
+    reasoning: "105,000 reasoning tokens",
+    cachePercent: "36.4% of input",
+    cacheSavings: "$7.19 USD",
+    priced: "90.9%",
+    unpriced: "9.1%",
+    chats: "11",
+    time: "10m 30s",
+    attributed: "500,000 attributed",
+    activityDays: 8,
+    providers: [
+      { provider: "Claude", cost: "$15.88 USD", tokens: "3,300,000 tokens" },
+      { provider: "Codex", cost: "$3.94 USD", tokens: "2,200,000 tokens" },
+    ],
+    models: [
+      { model: "claude-opus-5", cost: "$15.88 USD", tokens: "3,300,000" },
+      { model: "gpt-5.6-codex", cost: "$3.94 USD", tokens: "2,200,000" },
+    ],
+  },
+  "90 days": {
+    cost: "$22.61 USD*",
+    processed: 8_250_000,
+    cached: 2_250_000,
+    uncached: 5_050_000,
+    output: 750_000,
+    reasoning: "215,000 reasoning tokens",
+    cachePercent: "30.0% of input",
+    cacheSavings: "$7.19 USD",
+    priced: "80.0%",
+    unpriced: "20.0%",
+    chats: "22",
+    time: "21m 30s",
+    attributed: "700,000 attributed",
+    activityDays: 8,
+    providers: [
+      { provider: "Claude", cost: "$15.88 USD", tokens: "3,300,000 tokens" },
+      { provider: "Codex", cost: "$6.74 USD", tokens: "3,300,000 tokens" },
+      { provider: "OpenCode", cost: "unpriced", tokens: "1,100,000 tokens" },
+    ],
+    models: [
+      { model: "claude-opus-5", cost: "$15.88 USD", tokens: "3,300,000" },
+      { model: "gpt-4.1", cost: "$2.80 USD", tokens: "1,100,000" },
+      { model: "gpt-5.6-codex", cost: "$3.94 USD", tokens: "2,200,000" },
+      { model: "unknown-local-model", cost: "unpriced", tokens: "1,100,000" },
+    ],
+  },
+  All: {
+    cost: "$28.36 USD*",
+    processed: 10_175_000,
+    cached: 2_250_000,
+    uncached: 6_800_000,
+    output: 925_000,
+    reasoning: "292,500 reasoning tokens",
+    cachePercent: "24.3% of input",
+    cacheSavings: "$7.19 USD",
+    priced: "81.1%",
+    unpriced: "18.9%",
+    chats: "37",
+    time: "36m 00s",
+    attributed: "850,000 attributed",
+    activityDays: 8,
+    providers: [
+      { provider: "Claude", cost: "$15.88 USD", tokens: "3,300,000 tokens" },
+      { provider: "Codex", cost: "$10.24 USD", tokens: "4,400,000 tokens" },
+      { provider: "Grok", cost: "$2.25 USD", tokens: "550,000 tokens" },
+      { provider: "OpenCode", cost: "unpriced", tokens: "1,100,000 tokens" },
+    ],
+    models: [
+      { model: "claude-opus-5", cost: "$15.88 USD", tokens: "3,300,000" },
+      { model: "gpt-4.1", cost: "$2.80 USD", tokens: "1,100,000" },
+      { model: "gpt-4o", cost: "$3.50 USD", tokens: "1,100,000" },
+      { model: "gpt-5.6-codex", cost: "$3.94 USD", tokens: "2,200,000" },
+      { model: "grok-legacy-model", cost: "$2.25 USD", tokens: "550,000" },
+      { model: "unknown-local-model", cost: "unpriced", tokens: "1,100,000" },
+    ],
+  },
+} as const;
+
+function expectCostRange(label: keyof typeof rangeExpectations): void {
+  const expected = rangeExpectations[label];
+  expect(requiredElement("[data-usage-cost-hero-value]").textContent).toBe(expected.cost);
+  for (const id of ["processed", "cached", "uncached", "output"] as const) {
+    expect(displayedRawCount(id)).toBe(expected[id]);
+  }
+  expect(requiredElement("[data-usage-token-full='range']").textContent).toBe(
+    `${expected.processed.toLocaleString("en-US")} tokens in range`,
+  );
+  expect(requiredElement("[data-usage-token-full='reasoning']").textContent).toBe(
+    expected.reasoning,
+  );
+  expect(requiredElement("[data-usage-composition-tile='cached']").textContent).toContain(
+    expected.cachePercent,
+  );
+  expect(requiredElement("[data-usage-composition-value='cache-savings']").textContent).toBe(
+    expected.cacheSavings,
+  );
+  expect(requiredElement("[data-usage-cost-quality-cache-savings]").textContent).toBe(
+    expected.cacheSavings,
+  );
+  expect(costQualityValue("Priced")).toBe(expected.priced);
+  expect(costQualityValue("Unpriced")).toBe(expected.unpriced);
+  expect(providerCostRows()).toEqual(expected.providers);
+  expect(modelCostRows()).toEqual(expected.models);
+}
+
+function expectPanelRange(label: keyof typeof rangeExpectations): void {
+  const expected = rangeExpectations[label];
+  expectCostRange(label);
+  expect(overviewValue("Tokens generated")).toBe(expected.output.toLocaleString("en-US"));
+  expect(overviewValue("Chats sent")).toBe(expected.chats);
+  expect(overviewValue("Time spent generating")).toBe(expected.time);
+  expect(page.getByText(expected.attributed, { exact: true }).element()).toBeVisible();
+  expect(activeActivityCellCount()).toBe(expected.activityDays);
+}
+
 function expectFullBeforeCompact(context: string): void {
   const full = requiredElement(`[data-usage-token-full="${context}"]`);
   const compact = requiredElement(`[data-usage-token-compact="${context}"]`);
@@ -146,6 +605,50 @@ function expectFullBeforeCompact(context: string): void {
   expect(compact.getAttribute("aria-hidden")).toBe("true");
 }
 
+function expectNoHorizontalOverflow(element: HTMLElement): void {
+  expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth + 1);
+}
+
+function expectCompositionNumbersOnOneLine(): void {
+  for (const id of ["processed", "cached", "uncached", "output"]) {
+    const figure = requiredElement(`[data-usage-token-full="composition-${id}"]`);
+    const numericText = Array.from(figure.childNodes).find(
+      (node) => node.nodeType === Node.TEXT_NODE && /^[\d,]+/.test(node.textContent ?? ""),
+    );
+    expect(numericText).toBeDefined();
+    const digitLength = numericText!.textContent!.match(/^[\d,]+/)![0].length;
+    // Measure the digits themselves: the supporting word "tokens" may wrap,
+    // but a billion-scale counter must remain readable as one complete number.
+    const range = document.createRange();
+    range.setStart(numericText!, 0);
+    range.setEnd(numericText!, digitLength);
+    expect(Array.from(range.getClientRects()).filter((rect) => rect.width > 0)).toHaveLength(1);
+    expectNoHorizontalOverflow(figure);
+  }
+}
+
+function expectOverviewStacked(): void {
+  const overview = requiredElement("[data-usage-cost-overview]");
+  const hero = overview.children[0]!.getBoundingClientRect();
+  const chart = overview.children[1]!.getBoundingClientRect();
+  expect(chart.top).toBeGreaterThanOrEqual(hero.bottom);
+  expect(Math.abs(chart.left - hero.left)).toBeLessThanOrEqual(1);
+}
+
+function settleLayoutCountersImmediately(): void {
+  const matchMedia = window.matchMedia.bind(window);
+  // Geometry cases exercise the supported reduced-motion path so unrelated
+  // odometer timing cannot change measured text widths. Other media queries
+  // and the existing intermediate-counter animation test remain unaffected.
+  vi.spyOn(window, "matchMedia").mockImplementation((query) => {
+    const media = matchMedia(query);
+    if (query === "(prefers-reduced-motion: reduce)") {
+      Object.defineProperty(media, "matches", { value: true });
+    }
+    return media;
+  });
+}
+
 describe("UsageStatsPanel", () => {
   let mounted:
     | (Awaited<ReturnType<typeof render>> & {
@@ -153,8 +656,15 @@ describe("UsageStatsPanel", () => {
         unmount?: () => Promise<void>;
       })
     | null = null;
+  let originalViewport = { height: window.innerHeight, width: window.innerWidth };
+  let originalRootFontSize = "";
+  let originalRootFontPriority = "";
 
   beforeEach(() => {
+    originalViewport = { height: window.innerHeight, width: window.innerWidth };
+    originalRootFontSize = document.documentElement.style.getPropertyValue("font-size");
+    originalRootFontPriority = document.documentElement.style.getPropertyPriority("font-size");
+    resetUsageStatsDetailResourceForTests();
     usageHarness.reset(createUsageDetail(), snapshot);
   });
 
@@ -163,9 +673,456 @@ describe("UsageStatsPanel", () => {
     await teardown?.call(mounted).catch(() => {});
     mounted = null;
     document.body.innerHTML = "";
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    if (originalRootFontSize) {
+      document.documentElement.style.setProperty(
+        "font-size",
+        originalRootFontSize,
+        originalRootFontPriority,
+      );
+    } else {
+      document.documentElement.style.removeProperty("font-size");
+    }
+    if (
+      window.innerWidth !== originalViewport.width ||
+      window.innerHeight !== originalViewport.height
+    ) {
+      await page.viewport(originalViewport.width, originalViewport.height);
+    }
   });
 
-  it("renders stored provider and model token attribution with earlier usage separated", async () => {
+  it("filters usage and cost figures immediately while retaining the full Activity calendar", async () => {
+    const usage = createRangeUsageDetail();
+    usageHarness.reset(usage, usage);
+    mounted = await render(<UsageStatsPanel />);
+
+    // Initial loading may animate from zero; the range-change assertions below
+    // keep normal motion and still require immediate accounting transitions.
+    await vi.waitFor(() => expectPanelRange("30 days"), { timeout: 5_000 });
+    const ranges = document.querySelectorAll('[role="group"][aria-label="Usage date range"]');
+    expect(ranges).toHaveLength(1);
+    expect(page.getByRole("button", { name: "30 days", exact: true }).element().ariaPressed).toBe(
+      "true",
+    );
+    expect(
+      ranges[0]!.compareDocumentPosition(requiredElement("[data-usage-cost-layout]")) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+    const heatmap = requiredElement('[role="img"][aria-label^="Daily generating time"]');
+    expect(heatmap.getAttribute("aria-label")).toContain("from 2026-04-22 through 2026-07-21");
+    const activityColors = usage.days.map(({ day }) => ({
+      day,
+      cell: requiredElement(`[data-activity-day="${day}"][data-activity-in-range="true"]`),
+      color: requiredElement(`[data-activity-day="${day}"]`).style.backgroundColor,
+    }));
+
+    for (const label of ["7 days", "90 days", "All", "30 days"] as const) {
+      await page.getByRole("button", { name: label, exact: true }).click();
+      // These assertions intentionally run immediately with ordinary motion.
+      // A range switch changes accounting scope, so a tween through the old
+      // range's figures would temporarily disagree with the model rows.
+      expectPanelRange(label);
+      expect(page.getByRole("button", { name: label, exact: true }).element().ariaPressed).toBe(
+        "true",
+      );
+      expect(heatmap.getAttribute("aria-label")).toContain("from 2026-04-22 through 2026-07-21");
+      // A range change affects accounting cards only. April 22 is outside the
+      // ninety-day window, and its retained color also pins the lifetime peak used
+      // by every Activity cell instead of recoloring each shorter selection.
+      for (const { day, cell, color } of activityColors) {
+        const current = requiredElement(
+          `[data-activity-day="${day}"][data-activity-in-range="true"]`,
+        );
+        expect(current).toBe(cell);
+        expect(current.style.backgroundColor).toBe(color);
+      }
+    }
+    expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains accessible history older than 26 weeks and its scroll position across every range", async () => {
+    await page.viewport(640, 900);
+    const oldDay: UsageStatsDay = {
+      ...emptyTotals,
+      day: "2022-01-01",
+      generatingMs: 60_000,
+    };
+    const baseline = createRangeUsageDetail();
+    const usage: UsageStatsGetResult = {
+      ...baseline,
+      days: [oldDay, ...baseline.days],
+      totals: sumTotals([oldDay, baseline.totals]),
+    };
+    usageHarness.reset(usage, usage);
+    mounted = await render(<UsageStatsPanel />);
+    await vi.waitFor(() => expectCostRange("30 days"), { timeout: 5_000 });
+
+    const heatmap = requiredElement('[role="img"][aria-label^="Daily generating time"]');
+    expect(heatmap.getAttribute("aria-label")).toContain("from 2022-01-01 through 2026-07-21");
+    expect(heatmap.dataset.activityRangeDayCount).toBe("1663");
+    // A multi-year ledger uses the existing virtualized calendar. Its oldest
+    // stored day remains present at the beginning and can reveal its duration
+    // without inflating the rendered DOM to include every empty calendar day.
+    expect(heatmap.querySelectorAll('[data-activity-in-range="true"]').length).toBeLessThan(500);
+    const oldCell = requiredElement(
+      '[data-activity-day="2022-01-01"][data-activity-in-range="true"]',
+    );
+    expect(oldCell).toBeVisible();
+    const oldColor = oldCell.style.backgroundColor;
+    expect(oldColor).toContain("--color-primary");
+    expect((await hoverActivityCell("2022-01-01")).textContent).toContain("1m generating");
+
+    const scroller = requiredElement('[data-activity-heatmap-scroll="true"]');
+    scroller.scrollLeft = scroller.scrollWidth;
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector('[data-activity-day="2026-07-21"][data-activity-in-range="true"]'),
+      ).not.toBeNull(),
+    );
+    const scrollLeft = scroller.scrollLeft;
+    expect(scrollLeft).toBeGreaterThan(0);
+    const currentCell = requiredElement('[data-activity-day="2026-07-21"]');
+    const currentColor = currentCell.style.backgroundColor;
+
+    for (const label of ["7 days", "90 days", "All", "30 days"] as const) {
+      await page.getByRole("button", { name: label, exact: true }).click();
+      expectCostRange(label);
+      expect(heatmap.getAttribute("aria-label")).toContain("from 2022-01-01 through 2026-07-21");
+      expect(heatmap.dataset.activityRangeDayCount).toBe("1663");
+      expect(scroller.scrollLeft).toBe(scrollLeft);
+      expect(requiredElement('[data-activity-day="2026-07-21"]')).toBe(currentCell);
+      expect(currentCell.style.backgroundColor).toBe(currentColor);
+      expect((await hoverActivityCell("2026-07-21")).textContent).toContain("1m generating");
+    }
+
+    scroller.scrollLeft = 0;
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector('[data-activity-day="2022-01-01"][data-activity-in-range="true"]'),
+      ).not.toBeNull(),
+    );
+    expect(requiredElement('[data-activity-day="2022-01-01"]').style.backgroundColor).toBe(
+      oldColor,
+    );
+    expect((await hoverActivityCell("2022-01-01")).textContent).toContain("1m generating");
+    expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives standalone cost content the same default and complete range filtering", async () => {
+    mounted = await render(<UsageCostContent usage={createRangeUsageDetail()} />);
+    expectCostRange("30 days");
+    const ranges = document.querySelectorAll('[role="group"][aria-label="Usage date range"]');
+    expect(ranges).toHaveLength(1);
+    expect(
+      ranges[0]!.compareDocumentPosition(requiredElement("[data-usage-cost-overview]")) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+
+    for (const label of ["7 days", "90 days", "All", "30 days"] as const) {
+      await page.getByRole("button", { name: label, exact: true }).click();
+      expectCostRange(label);
+    }
+    await page.getByRole("button", { name: "tokens", exact: true }).click();
+    expect(requiredElement("[data-usage-cost-chart-label]").textContent).toBe("Daily tokens");
+    await page.getByRole("button", { name: "7 days", exact: true }).click();
+    expectCostRange("7 days");
+    expect(page.getByRole("button", { name: "tokens", exact: true }).element().ariaPressed).toBe(
+      "true",
+    );
+    await expect.element(page.getByText("Cache writes", { exact: true })).toBeVisible();
+    const chart = requiredElement('[data-usage-cost-overview] svg[role="img"]');
+    const chartBounds = chart.getBoundingClientRect();
+    chart.dispatchEvent(
+      new PointerEvent("pointermove", {
+        bubbles: true,
+        clientX: chartBounds.right - 1,
+        clientY: chartBounds.top + 10,
+      }),
+    );
+    // Today's 500K cache reads, 100K writes, 400K fresh input, and 100K
+    // output must stack to the complete daily processed-token count.
+    await expect.element(page.getByText("1,100,000 tokens (1.10M)", { exact: true })).toBeVisible();
+  });
+
+  it("keeps daily counters but discloses unpriced coverage when daily attribution is absent", async () => {
+    const usage = { ...createRangeUsageDetail(), tokenBreakdownDays: undefined };
+    usageHarness.reset(usage, usage);
+    mounted = await render(<UsageStatsPanel />);
+
+    await vi.waitFor(() => expect(displayedRawCount("processed")).toBe(6_050_000), {
+      timeout: 5_000,
+    });
+    expect(overviewValue("Tokens generated")).toBe("550,000");
+    expect(overviewValue("Chats sent")).toBe("11");
+    expect(overviewValue("Time spent generating")).toBe("10m 30s");
+    expect(requiredElement("[data-usage-cost-hero-value]").textContent).toBe("$0.00 USD*");
+    expect(providerCostRows()).toEqual([]);
+    expect(modelCostRows()).toEqual([]);
+    expect(costQualityValue("Priced")).toBe("0.0%");
+    expect(costQualityValue("Unpriced")).toBe("100.0%");
+    expect(
+      requiredElement('[aria-label="Token usage by provider and model"]').textContent,
+    ).toContain("550,000");
+    expect(document.body.textContent).not.toContain("grok-legacy-model");
+    expect(activeActivityCellCount()).toBe(8);
+
+    await page.getByRole("button", { name: "All", exact: true }).click();
+    expectPanelRange("All");
+  });
+
+  it("uses live snapshots for generating status and detailed refreshes for matching counters and models", async () => {
+    const usage = createRangeUsageDetail();
+    usageHarness.reset(usage, usage);
+    mounted = await render(<UsageStatsPanel />);
+    await vi.waitFor(() => expectPanelRange("30 days"), { timeout: 5_000 });
+
+    usageHarness.emitSnapshot({
+      ...usage,
+      totals: { ...usage.totals, outputTokens: 5_000_000, userMessages: 500 },
+      today: { ...usage.today, outputTokens: 4_000_000, userMessages: 400 },
+      activeSessionCount: 1,
+      asOfMs: Date.now(),
+    });
+    await expect.element(page.getByText("Generating", { exact: true })).toBeVisible();
+    expect(overviewValue("Tokens generated")).toBe("550,000");
+    expect(overviewValue("Chats sent")).toBe("11");
+    expectCostRange("30 days");
+    expect(page.getByText("500,000 attributed", { exact: true }).element()).toBeVisible();
+
+    const freshToday = {
+      ...usage.today,
+      inputTokens: usage.today.inputTokens + 1_000,
+      outputTokens: usage.today.outputTokens + 100,
+      userMessages: usage.today.userMessages + 1,
+    };
+    const freshUsage: UsageStatsGetResult = {
+      ...usage,
+      totals: {
+        ...usage.totals,
+        inputTokens: usage.totals.inputTokens + 1_000,
+        outputTokens: usage.totals.outputTokens + 100,
+        userMessages: usage.totals.userMessages + 1,
+      },
+      today: freshToday,
+      days: usage.days.map((day) => (day.day === freshToday.day ? freshToday : day)),
+      tokenBreakdown: usage.tokenBreakdown.map((entry) =>
+        entry.model === "gpt-5.6-codex"
+          ? {
+              ...entry,
+              inputTokens: entry.inputTokens + 1_000,
+              outputTokens: entry.outputTokens + 100,
+            }
+          : entry,
+      ),
+      tokenBreakdownDays: usage.tokenBreakdownDays?.map((entry) =>
+        entry.day === freshToday.day
+          ? {
+              ...entry,
+              inputTokens: entry.inputTokens + 1_000,
+              outputTokens: entry.outputTokens + 100,
+            }
+          : entry,
+      ),
+      asOfMs: Date.now(),
+    };
+    usageHarness.refreshDetail(freshUsage);
+    await vi.waitFor(() => expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(2));
+    await vi.waitFor(
+      () => {
+        expect(overviewValue("Tokens generated")).toBe("550,100");
+        expect(overviewValue("Chats sent")).toBe("12");
+        expect(displayedRawCount("processed")).toBe(6_051_100);
+        expect(displayedRawCount("output")).toBe(550_100);
+        expect(modelCostRows().find((entry) => entry.model === "gpt-5.6-codex")?.tokens).toBe(
+          "2,201,100",
+        );
+        expect(page.getByText("500,100 attributed", { exact: true }).element()).toBeVisible();
+      },
+      { timeout: 3_000 },
+    );
+  });
+
+  it("resets the selected total's floor while retaining today's Activity floor across ranges", async () => {
+    // Only Date is controlled: the component's real 250ms projection timer,
+    // detail resource, React updates, and browser layout still execute normally.
+    const baseMs = Date.parse("2026-07-21T12:00:00Z");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(baseMs);
+    const usage = { ...createRangeUsageDetail(), asOfMs: baseMs };
+    usageHarness.reset(usage, usage);
+    mounted = await render(<UsageStatsPanel />);
+    await vi.waitFor(() => expectPanelRange("30 days"));
+
+    vi.setSystemTime(baseMs + 10_000);
+    usageHarness.emitSnapshot({
+      ...usage,
+      today: { ...usage.today, generatingMs: usage.today.generatingMs + 10_000 },
+      activeSessionCount: 2,
+      asOfMs: baseMs + 10_000,
+    });
+    await vi.waitFor(() => expect(overviewValue("Time spent generating")).toBe("10m 40s"));
+    await expect.element(page.getByText("2 sessions generating", { exact: true })).toBeVisible();
+
+    // Two current sessions add two seconds after this newer observation; they
+    // must not be charged for all ten seconds since the earlier detail read.
+    vi.setSystemTime(baseMs + 11_000);
+    await vi.waitFor(() => expect(overviewValue("Time spent generating")).toBe("10m 42s"));
+    expect((await hoverActivityCell("2026-07-21")).textContent).toContain("1m 12s generating");
+    expectCostRange("30 days");
+
+    // A lower settled observation may trail projection. Hold both the hero
+    // time and today's heatmap value at the same floor until accounting catches
+    // up, and do not let an out-of-order stream event re-enable activity.
+    vi.setSystemTime(baseMs + 12_000);
+    usageHarness.emitSnapshot({
+      ...usage,
+      today: { ...usage.today, generatingMs: usage.today.generatingMs + 1_000 },
+      activeSessionCount: 0,
+      asOfMs: baseMs + 12_000,
+    });
+    await expect
+      .element(page.getByText("2 sessions generating", { exact: true }))
+      .not.toBeInTheDocument();
+    expect(overviewValue("Time spent generating")).toBe("10m 42s");
+    expect((await hoverActivityCell("2026-07-21")).textContent).toContain("1m 12s generating");
+    usageHarness.emitSnapshot({
+      ...usage,
+      today: { ...usage.today, generatingMs: usage.today.generatingMs + 30_000 },
+      activeSessionCount: 3,
+      asOfMs: baseMs + 9_000,
+    });
+    await page.getByRole("button", { name: "7 days", exact: true }).click();
+    expect(overviewValue("Time spent generating")).toBe("3m 31s");
+    expect(overviewValue("Tokens generated")).toBe("250,000");
+    expectCostRange("7 days");
+    expect(document.body.textContent).not.toContain("sessions generating");
+    expect((await hoverActivityCell("2026-07-21")).textContent).toContain("1m 12s generating");
+    for (const label of ["90 days", "All", "30 days", "7 days"] as const) {
+      await page.getByRole("button", { name: label, exact: true }).click();
+      expectCostRange(label);
+      // The latest settled detail is below the earlier live projection. Only
+      // the summary's accounting scope resets; Activity must keep today's
+      // already displayed duration even when a selector is clicked repeatedly.
+      expect((await hoverActivityCell("2026-07-21")).textContent).toContain("1m 12s generating");
+    }
+  });
+
+  it("freezes the old server day at midnight until a newer detailed response replaces its calendar", async () => {
+    const baseMs = Date.parse("2026-07-21T23:59:58Z");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(baseMs);
+    const usage = { ...createRangeUsageDetail(), activeSessionCount: 1, asOfMs: baseMs };
+    usageHarness.reset(usage, usage);
+    mounted = await render(<UsageStatsPanel />);
+    await vi.waitFor(() => expect(overviewValue("Time spent generating")).toBe("10m 30s"));
+    await page.getByRole("button", { name: "7 days", exact: true }).click();
+    expect(overviewValue("Time spent generating")).toBe("3m 30s");
+    vi.setSystemTime(baseMs + 1_000);
+    await vi.waitFor(() => expect(overviewValue("Time spent generating")).toBe("3m 31s"));
+
+    vi.setSystemTime(baseMs + 2_000);
+    usageHarness.emitSnapshot({
+      ...usage,
+      today: { ...emptyTotals, day: "2026-07-22", generatingMs: 1_000 },
+      activeSessionCount: 2,
+      asOfMs: baseMs + 2_000,
+    });
+    await expect.element(page.getByText("2 sessions generating", { exact: true })).toBeVisible();
+    vi.setSystemTime(baseMs + 12_000);
+    // Let the real projection interval read the post-midnight clock before
+    // checking the unchanged value; an immediate assertion would only inspect
+    // the render from the midnight event and miss continued extrapolation.
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 350));
+    expect(overviewValue("Time spent generating")).toBe("3m 31s");
+    expectCostRange("7 days");
+    expect(overviewValue("Tokens generated")).toBe("250,000");
+    expect(
+      document.querySelector('[data-activity-day="2026-07-22"][data-activity-in-range="true"]'),
+    ).toBeNull();
+    expect((await hoverActivityCell("2026-07-21")).textContent).toContain("1m 1s generating");
+
+    const newToday: UsageStatsDay = {
+      ...emptyTotals,
+      day: "2026-07-22",
+      generatingMs: 2_000,
+      inputTokens: 100,
+      outputTokens: 10,
+      reasoningOutputTokens: 1,
+      userMessages: 1,
+    };
+    const newAttribution = {
+      day: newToday.day,
+      provider: ProviderDriverKind.make("codex"),
+      model: "gpt-5.6-codex",
+      inputTokens: 100,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 10,
+      reasoningOutputTokens: 1,
+    };
+    const freshUsage: UsageStatsGetResult = {
+      ...usage,
+      totals: sumTotals([usage.totals, newToday]),
+      today: newToday,
+      days: [...usage.days, newToday],
+      tokenBreakdown: usage.tokenBreakdown.map((entry) =>
+        entry.model === newAttribution.model
+          ? {
+              ...entry,
+              inputTokens: entry.inputTokens + newAttribution.inputTokens,
+              outputTokens: entry.outputTokens + newAttribution.outputTokens,
+              reasoningOutputTokens:
+                entry.reasoningOutputTokens + newAttribution.reasoningOutputTokens,
+            }
+          : entry,
+      ),
+      tokenBreakdownDays: [...(usage.tokenBreakdownDays ?? []), newAttribution],
+      activeSessionCount: 0,
+      // This completed detail is newer than the active midnight stream event.
+      asOfMs: baseMs + 12_000,
+    };
+    usageHarness.refreshDetail(freshUsage);
+    await vi.waitFor(() => {
+      expect(overviewValue("Time spent generating")).toBe("1m 32s");
+      expect(overviewValue("Tokens generated")).toBe("150,010");
+      expect(overviewValue("Chats sent")).toBe("3");
+      expect(displayedRawCount("processed")).toBe(1_650_110);
+      expect(displayedRawCount("output")).toBe(150_010);
+    });
+    expect(document.body.textContent).not.toContain("sessions generating");
+    expect(
+      requiredElement('[role="img"][aria-label^="Daily generating time"]').getAttribute(
+        "aria-label",
+      ),
+    ).toContain("from 2026-04-22 through 2026-07-22");
+    expect(activeActivityCellCount()).toBe(9);
+    expect((await hoverActivityCell("2026-07-15")).textContent).toContain("2m generating");
+    expect((await hoverActivityCell("2026-04-22")).textContent).toContain("7m generating");
+    expect((await hoverActivityCell("2026-07-22")).textContent).toContain("2s generating");
+    const refreshedActivity = freshUsage.days.map(({ day }) => ({
+      day,
+      color: requiredElement(`[data-activity-day="${day}"]`).style.backgroundColor,
+    }));
+    for (const label of ["30 days", "90 days", "All", "7 days"] as const) {
+      await page.getByRole("button", { name: label, exact: true }).click();
+      expect(
+        requiredElement('[role="img"][aria-label^="Daily generating time"]').getAttribute(
+          "aria-label",
+        ),
+      ).toContain("from 2026-04-22 through 2026-07-22");
+      expect(activeActivityCellCount()).toBe(9);
+      for (const { day, color } of refreshedActivity) {
+        expect(
+          requiredElement(`[data-activity-day="${day}"][data-activity-in-range="true"]`).style
+            .backgroundColor,
+        ).toBe(color);
+      }
+      expect((await hoverActivityCell("2026-07-22")).textContent).toContain("2s generating");
+    }
+  });
+
+  it("renders stored provider and model token attribution with unattributed usage separated", async () => {
     mounted = await render(<UsageStatsPanel />);
 
     await expect.element(page.getByText("Tokens by provider and model")).toBeVisible();
@@ -181,13 +1138,95 @@ describe("UsageStatsPanel", () => {
       .element(page.getByText("gpt-5.6-codex-mini", { exact: true }).first())
       .toBeVisible();
     await expect.element(page.getByText("claude-opus-5", { exact: true }).first()).toBeVisible();
-    await expect.element(page.getByText("Earlier usage")).toBeVisible();
+    await expect.element(page.getByText("Unattributed usage")).toBeVisible();
     await expect
-      .element(page.getByText("Recorded before provider and model attribution"))
+      .element(page.getByText("Recorded usage without provider and model attribution"))
       .toBeVisible();
     expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
     expect(usageHarness.subscribeConnectionOpened).toHaveBeenCalledTimes(1);
     expect(usageHarness.subscribeUsageStats).toHaveBeenCalledTimes(1);
+  });
+
+  it("explains an omitted effective model while retaining its exact counted and unpriced usage", async () => {
+    // This synthetic observation has a known provider but no effective model.
+    // Cached input is a subset of input, so the unpriced processed volume is
+    // 20,511 input + 16 output, never input plus cached input a second time.
+    const today: UsageStatsDay = {
+      ...emptyTotals,
+      day: "2026-07-21",
+      inputTokens: 20_511,
+      cachedInputTokens: 9_984,
+      outputTokens: 16,
+      userMessages: 1,
+    };
+    const unknownModel: UsageStatsTokenBreakdownEntry = {
+      provider: ProviderDriverKind.make("codex"),
+      model: "unknown",
+      inputTokens: 20_511,
+      cachedInputTokens: 9_984,
+      cacheWriteInputTokens: 0,
+      outputTokens: 16,
+      reasoningOutputTokens: 0,
+    };
+    const usage: UsageStatsGetResult = {
+      ...snapshot,
+      totals: today,
+      today,
+      days: [today],
+      tokenBreakdown: [unknownModel],
+      tokenBreakdownDays: [{ ...unknownModel, day: today.day }],
+    };
+    usageHarness.reset(usage, usage);
+    mounted = await render(<UsageStatsPanel />);
+    await vi.waitFor(
+      () => {
+        expect(overviewValue("Tokens generated")).toBe("16");
+        expect(displayedRawCount("processed")).toBe(20_527);
+        expect(displayedRawCount("cached")).toBe(9_984);
+        expect(displayedRawCount("uncached")).toBe(10_527);
+        expect(displayedRawCount("output")).toBe(16);
+      },
+      { timeout: 5_000 },
+    );
+
+    const costLabel = requiredElement("[data-usage-cost-breakdown] tbody span[title]");
+    const tokenLabel = requiredElement(
+      '[aria-label="Token usage by provider and model"] span[title]',
+    );
+    const explanation =
+      "The provider reported token usage without identifying the effective model. Tokens remain counted; cost is unpriced unless you set a custom rate.";
+    expect(costLabel.textContent).toBe("Model not reported");
+    expect(tokenLabel.textContent).toBe("Model not reported");
+    expect(costLabel.title).toBe(explanation);
+    expect(tokenLabel.title).toBe(explanation);
+    // A missing model must not turn a known provider into unattributed output
+    // or silently price the observation as the user's requested model.
+    expect(page.getByText("16 attributed", { exact: true }).element()).toBeVisible();
+    expect(tokenLabel.parentElement!.lastElementChild!.lastElementChild!.textContent).toBe("16");
+    expect(document.body.textContent).not.toContain("Unattributed usage");
+
+    for (const label of ["7 days", "90 days", "All", "30 days"] as const) {
+      await page.getByRole("button", { name: label, exact: true }).click();
+      expect(overviewValue("Tokens generated")).toBe("16");
+      expect(displayedRawCount("processed")).toBe(20_527);
+      expect(displayedRawCount("output")).toBe(16);
+      expect(requiredElement("[data-usage-cost-hero-value]").textContent).toBe("$0.00 USD*");
+      expect(costQualityValue("Priced")).toBe("0.0%");
+      expect(costQualityValue("Unpriced")).toBe("100.0%");
+      expect(providerCostRows()).toEqual([
+        { provider: "Codex", cost: "unpriced", tokens: "20,527 tokens" },
+      ]);
+      expect(modelCostRows()).toEqual([
+        { model: "Model not reported", cost: "unpriced", tokens: "20,527" },
+      ]);
+      expect(requiredElement("[data-usage-cost-breakdown] tbody span[title]").title).toBe(
+        explanation,
+      );
+      expect(
+        requiredElement('[aria-label="Token usage by provider and model"] span[title]').title,
+      ).toBe(explanation);
+    }
+    expect(usageHarness.getUsageStats).toHaveBeenCalledTimes(1);
   });
 
   it("renders a quiet empty state before attributed tokens exist", async () => {
@@ -195,6 +1234,7 @@ describe("UsageStatsPanel", () => {
       {
         ...snapshot,
         totals: { ...totals, outputTokens: 0 },
+        today: { ...snapshot.today, outputTokens: 0 },
         days: [],
         tokenBreakdown: [],
       },
@@ -240,9 +1280,9 @@ describe("UsageStatsPanel", () => {
     expect(modelCosts.every((entry) => /\$[\d,.]+ USD/.test(entry.textContent ?? ""))).toBe(true);
 
     expect(requiredElement('[data-usage-token-full="range"]').textContent).toContain(
-      "350,000 tokens in range",
+      "3,000,000 tokens in range",
     );
-    expect(requiredElement('[data-usage-token-compact="range"]').textContent).toBe("350K");
+    expect(requiredElement('[data-usage-token-compact="range"]').textContent).toBe("3.00M");
     expectFullBeforeCompact("range");
 
     const providerFullCounts = Array.from(
@@ -321,6 +1361,7 @@ describe("UsageStatsPanel", () => {
         }}
       />,
     );
+    await page.getByRole("button", { name: "All", exact: true }).click();
     expect(requiredElement('[data-usage-composition-value="cache-savings"]').textContent).toBe(
       "-$1.00 USD",
     );
@@ -344,6 +1385,7 @@ describe("UsageStatsPanel", () => {
       },
     };
     mounted = await render(<UsageCostContent usage={usage} />);
+    await page.getByRole("button", { name: "All", exact: true }).click();
 
     expect(requiredElement('[data-usage-token-full="composition-processed"]').textContent).toBe(
       "3,539,966,200 tokens",
@@ -357,6 +1399,7 @@ describe("UsageStatsPanel", () => {
   it("animates the full aggregate count through a small increment", async () => {
     const initialUsage = createUsageDetail();
     mounted = await render(<UsageCostContent usage={initialUsage} />);
+    await page.getByRole("button", { name: "All", exact: true }).click();
     expect(displayedRawCount("processed")).toBe(3_000_000);
 
     const nextUsage = {
@@ -391,4 +1434,105 @@ describe("UsageStatsPanel", () => {
       await page.viewport(originalViewport.width, originalViewport.height);
     }
   });
+
+  it("uses the wide space remaining beside the sidebar for the chart and complete metrics", async () => {
+    await page.viewport(1_800, 1_000);
+    applyInterfaceScalePercent(100);
+    settleLayoutCountersImmediately();
+    const usage = createBillionScaleUsageDetail();
+    usageHarness.reset(usage, usage);
+    mounted = await render(
+      <div className="flex h-dvh min-w-0 w-full">
+        <aside data-usage-test-sidebar style={{ width: 280, flexShrink: 0 }}>
+          Settings navigation
+        </aside>
+        <UsageStatsPanel />
+      </div>,
+    );
+    await vi.waitFor(() => expect(displayedRawCount("processed")).toBe(3_000_000_000));
+
+    const sidebar = requiredElement("[data-usage-test-sidebar]").getBoundingClientRect();
+    const layout = requiredElement("[data-usage-cost-layout]");
+    const bounds = layout.getBoundingClientRect();
+    // Allow the page's ordinary gutters while rejecting the old 768px cap.
+    expect(bounds.width).toBeGreaterThan(window.innerWidth - sidebar.width - 128);
+    expect(bounds.left).toBeGreaterThan(sidebar.right);
+    const chart = requiredElement('[data-usage-cost-overview] svg[role="img"]');
+    expect(chart.getBoundingClientRect().width).toBeGreaterThan(800);
+    expect(chart.getBoundingClientRect().height).toBeGreaterThan(260);
+    const tiles = Array.from(document.querySelectorAll("[data-usage-composition-tile]"));
+    expect(tiles).toHaveLength(5);
+    for (const tile of tiles) {
+      expect(
+        Math.abs(tile.getBoundingClientRect().top - tiles[0]!.getBoundingClientRect().top),
+      ).toBeLessThanOrEqual(1);
+    }
+    expectCompositionNumbersOnOneLine();
+    expectNoHorizontalOverflow(layout);
+    expectNoHorizontalOverflow(document.documentElement);
+  });
+
+  it("stacks in a narrow parent inside a wide viewport and grows the chart with its parent", async () => {
+    await page.viewport(1_800, 1_000);
+    applyInterfaceScalePercent(100);
+    settleLayoutCountersImmediately();
+    const usage = createBillionScaleUsageDetail();
+    const content = (width: number) => (
+      <div data-usage-test-parent style={{ width, maxWidth: "100%" }}>
+        <UsageCostContent usage={usage} />
+      </div>
+    );
+    mounted = await render(content(640));
+    expectOverviewStacked();
+    const narrowChart = requiredElement(
+      '[data-usage-cost-overview] svg[role="img"]',
+    ).getBoundingClientRect();
+    expect(narrowChart.width).toBeGreaterThan(540);
+    expectNoHorizontalOverflow(requiredElement("[data-usage-test-parent]"));
+
+    await mounted.rerender(content(1_320));
+    const wideChart = requiredElement(
+      '[data-usage-cost-overview] svg[role="img"]',
+    ).getBoundingClientRect();
+    expect(wideChart.width).toBeGreaterThan(narrowChart.width + 200);
+    expect(wideChart.height).toBeGreaterThan(narrowChart.height + 80);
+    expectCompositionNumbersOnOneLine();
+    expectNoHorizontalOverflow(requiredElement("[data-usage-test-parent]"));
+  });
+
+  it.each([80, 130])(
+    "contains billion-scale usage at %i%% interface scale in wide and 320px panels",
+    async (scale) => {
+      await page.viewport(1_800, 1_000);
+      applyInterfaceScalePercent(scale);
+      settleLayoutCountersImmediately();
+      const usage = createBillionScaleUsageDetail();
+      usageHarness.reset(usage, usage);
+      mounted = await render(
+        <div className="flex h-dvh min-w-0 w-full">
+          <aside style={{ width: 280, flexShrink: 0 }}>Settings navigation</aside>
+          <UsageStatsPanel />
+        </div>,
+      );
+      await vi.waitFor(() => expect(displayedRawCount("processed")).toBe(3_000_000_000));
+      expectCompositionNumbersOnOneLine();
+      expectNoHorizontalOverflow(requiredElement("[data-usage-cost-layout]"));
+      expectNoHorizontalOverflow(document.documentElement);
+
+      await page.viewport(320, 1_000);
+      await mounted.rerender(
+        <div className="flex h-dvh min-w-0 w-full">
+          <UsageStatsPanel />
+        </div>,
+      );
+      await vi.waitFor(() => expect(displayedRawCount("processed")).toBe(3_000_000_000));
+      expectOverviewStacked();
+      const layout = requiredElement("[data-usage-cost-layout]");
+      expectNoHorizontalOverflow(layout);
+      expectNoHorizontalOverflow(document.documentElement);
+      for (const tile of document.querySelectorAll<HTMLElement>("[data-usage-composition-tile]")) {
+        expectNoHorizontalOverflow(tile);
+      }
+    },
+  );
 });

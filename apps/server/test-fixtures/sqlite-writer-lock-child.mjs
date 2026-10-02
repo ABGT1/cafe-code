@@ -154,10 +154,11 @@ process.once("message", (input) => {
           }
         };
         if (command.releaseOnCommand === true) {
-          // Retry-count tests cannot use a wall-clock hold to decide which
-          // attempt wins: process scheduling varies dramatically across the
-          // three CI operating systems. An explicit release lets the parent
-          // prove the first busy timeout occurred before this writer commits.
+          // Neither retry-count nor ordering-only tests can use a wall-clock
+          // hold to decide which attempt wins: process scheduling varies across
+          // the three CI operating systems. Explicit release lets the parent
+          // prove either its first busy timeout or the required WAL/tombstone
+          // ordering before allowing this writer to commit.
           process.once("message", (release) => {
             if (
               typeof release === "object" &&

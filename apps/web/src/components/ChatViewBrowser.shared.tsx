@@ -36,6 +36,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { render } from "vitest-browser-react";
 
 import { useCommandPaletteStore } from "../commandPaletteStore";
+import { createDeskState, deskTabKey } from "../deskModel";
+import { useDeskStore } from "../deskStore";
 import { useComposerDraftStore, DraftId } from "../composerDraftStore";
 import { __resetEnvironmentApiOverridesForTests } from "../environmentApi";
 import { isMacPlatform } from "../lib/utils";
@@ -45,7 +47,7 @@ import { AppAtomRegistryProvider } from "../rpc/atomRegistry";
 import { getServerConfig } from "../rpc/serverState";
 import { getRouter } from "../router";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
-import { selectBootstrapCompleteForActiveEnvironment, useStore } from "../store";
+import { selectBootstrapCompleteForActiveEnvironment, selectThreadByRef, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { useTaskAtriumStore } from "./atrium/taskAtriumStore";
 import { toastManager } from "./ui/toast";
@@ -92,6 +94,21 @@ const NOW_ISO = "2026-03-04T12:00:00.000Z";
 const BASE_TIME_MS = Date.parse(NOW_ISO);
 const ATTACHMENT_SVG = "<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'></svg>";
 const ADD_PROJECT_SUBMENU_PLACEHOLDER = "Enter path (e.g. ~/projects/my-app)";
+
+function readSidebarRowPresentation(element: Element) {
+  const style = getComputedStyle(element);
+  return {
+    height: style.height,
+    radius: style.borderRadius,
+    background: style.backgroundColor,
+    backgroundImage: style.backgroundImage,
+    shadow: style.boxShadow,
+    color: style.color,
+    weight: style.fontWeight,
+    paddingLeft: style.paddingLeft,
+    paddingRight: style.paddingRight,
+  };
+}
 
 interface TestFixture {
   snapshot: OrchestrationReadModel;
@@ -1908,7 +1925,7 @@ async function mountChatView(options: {
   };
 }
 
-type ChatViewBrowserPart = "composer" | "navigation" | "layout";
+type ChatViewBrowserPart = "composer" | "navigation" | "layout" | "desk";
 
 const chatViewBrowserPart = (
   globalThis as typeof globalThis & {
@@ -1993,7 +2010,9 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
     await __resetLocalApiForTests();
     resetSourceControlDiscoveryStateForTests();
     await setViewport(DEFAULT_VIEWPORT);
+    useDeskStore.getState().bindEnvironment(null);
     localStorage.clear();
+    useDeskStore.setState({ desk: createDeskState() });
     document.body.innerHTML = "";
     wsRequests.length = 0;
     customWsRpcResolver = null;
@@ -2037,20 +2056,21 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       });
       const snapshot = {
         ...base,
-        threads: base.threads.map((thread) => ({
-          ...thread,
-          latestTurn: {
-            turnId: "previous-turn" as TurnId,
-            state: "completed" as const,
-            requestedAt: isoAt(100),
-            startedAt: isoAt(101),
-            completedAt: isoAt(130),
-            assistantMessageId: null,
-          },
-          session: thread.session
-            ? { ...thread.session, providerInstanceId: ProviderInstanceId.make("codex") }
-            : null,
-        })),
+        threads: base.threads.map((thread) =>
+          Object.assign({}, thread, {
+            latestTurn: {
+              turnId: "previous-turn" as TurnId,
+              state: "completed" as const,
+              requestedAt: isoAt(100),
+              startedAt: isoAt(101),
+              completedAt: isoAt(130),
+              assistantMessageId: null,
+            },
+            session: thread.session
+              ? { ...thread.session, providerInstanceId: ProviderInstanceId.make("codex") }
+              : null,
+          }),
+        ),
       };
       const mounted = await mountChatView({
         viewport: DEFAULT_VIEWPORT,
@@ -2670,7 +2690,8 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
 
         await vi.waitFor(() => {
           expect(findSessionRail()).not.toBeNull();
-          expect(useUiStateStore.getState().sessionRailDocked).toBe(true);
+          expect(useDeskStore.getState().desk.groups.g1?.sessionRailDocked).toBe(true);
+          expect(useUiStateStore.getState().sessionRailDocked).toBe(false);
         });
 
         const rail = findSessionRail();
@@ -2692,6 +2713,7 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
         await page.getByRole("button", { name: "Show in composer" }).click();
         await vi.waitFor(() => {
           expect(findSessionRail()).toBeNull();
+          expect(useDeskStore.getState().desk.groups.g1?.sessionRailDocked).toBe(false);
           expect(useUiStateStore.getState().sessionRailDocked).toBe(false);
         });
         expect(document.querySelector('button[aria-label^="Context window"]')).not.toBeNull();
@@ -6286,7 +6308,451 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
     });
   }
 
+  if (chatViewBrowserPart === "desk") {
+    const secondId = "thread-desk-secondary" as ThreadId;
+    const secondRef = scopeThreadRef(LOCAL_ENVIRONMENT_ID, secondId);
+    const firstTarget = { kind: "server" as const, threadRef: THREAD_REF };
+    const secondTarget = { kind: "server" as const, threadRef: secondRef };
+    const firstKey = deskTabKey(firstTarget);
+    const secondKey = deskTabKey(secondTarget);
+    const withSecondThread = (snapshot: OrchestrationReadModel): OrchestrationReadModel => ({
+      ...snapshot,
+      threads: [
+        ...snapshot.threads,
+        { ...snapshot.threads[0]!, id: secondId, title: "Second Desk chat" },
+      ],
+    });
+    const splitChats = async () => {
+      const dispatch = useDeskStore.getState().dispatch;
+      dispatch({ type: "open", target: secondTarget });
+      dispatch({ type: "split", tabKey: secondKey, targetGroupId: "g1", edge: "right" });
+      await vi.waitFor(() =>
+        expect(document.querySelectorAll('[data-testid="composer-editor"]')).toHaveLength(2),
+      );
+    };
+    const seedDeskQueue = async (runtimeMode: RuntimeMode = "full-access") => {
+      const queue = createFollowUpQueuePersistence();
+      expect(
+        (
+          await queue.save(LOCAL_ENVIRONMENT_ID, [
+            {
+              id: "desk-single-queue",
+              environmentId: LOCAL_ENVIRONMENT_ID,
+              threadId: THREAD_ID,
+              promptText: "Run this once",
+              images: [],
+              files: [],
+              provider: ProviderDriverKind.make("codex"),
+              model: "gpt-5",
+              promptEffort: null,
+              modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5"),
+              runtimeMode,
+              interactionMode: "default",
+              queuedAt: isoAt(1000),
+              blockedReason: null,
+            },
+          ])
+        ).ok,
+      ).toBe(true);
+      useDeskStore.getState().bindEnvironment(LOCAL_ENVIRONMENT_ID);
+      const dispatch = useDeskStore.getState().dispatch;
+      dispatch({ type: "open", target: firstTarget });
+      dispatch({ type: "open", target: secondTarget });
+      dispatch({ type: "split", tabKey: secondKey, targetGroupId: "g1", edge: "right" });
+      return queue;
+    };
+
+    it("restores a detached timeline review position after selecting another tab", async () => {
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: withSecondThread(
+          createSnapshotForTargetUser({
+            targetMessageId: MessageId.make("desk-review"),
+            targetText: "Desk review fixture",
+          }),
+        ),
+      });
+      try {
+        const scroller = await waitForElement(
+          () =>
+            document
+              .querySelector<HTMLElement>('[data-timeline-root="true"]')
+              ?.closest<HTMLElement>(".overscroll-y-contain") ?? null,
+          "Timeline scroller missing",
+        );
+        await vi.waitFor(() =>
+          expect(scroller.scrollHeight).toBeGreaterThan(scroller.clientHeight),
+        );
+        await vi.waitFor(() => expect(scroller.scrollTop).toBeGreaterThan(1000));
+        await waitForLayout();
+        scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -600, bubbles: true }));
+        await waitForLayout();
+        scroller.scrollTop = 300;
+        scroller.dispatchEvent(new Event("scroll"));
+        await waitForLayout();
+        await vi.waitFor(() => expect(document.body.textContent).toContain("Scroll to bottom"));
+        const reviewOffset = scroller.scrollTop;
+        expect(reviewOffset).toBeLessThan(scroller.scrollHeight - scroller.clientHeight - 100);
+        useDeskStore.getState().dispatch({ type: "open", target: secondTarget });
+        await vi.waitFor(() => expect(scroller.isConnected).toBe(false));
+        const secondScroller = document
+          .querySelector<HTMLElement>('[data-timeline-root="true"]')!
+          .closest<HTMLElement>(".overscroll-y-contain")!;
+        useDeskStore.getState().dispatch({ type: "select", tabKey: firstKey });
+        await vi.waitFor(() => expect(secondScroller.isConnected).toBe(false));
+        const restored = await waitForElement(
+          () =>
+            document
+              .querySelector<HTMLElement>('[data-timeline-root="true"]')
+              ?.closest<HTMLElement>(".overscroll-y-contain") ?? null,
+          "Restored timeline missing",
+        );
+        await vi.waitFor(() =>
+          expect(Math.abs(restored.scrollTop - reviewOffset)).toBeLessThan(100),
+        );
+        expect(restored.scrollTop).toBeLessThan(
+          restored.scrollHeight - restored.clientHeight - 100,
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
+    it("preserves a reopened chat's newer draft when its previous direct steer ACK arrives", async () => {
+      const base = createSnapshotForTargetUser({
+        targetMessageId: MessageId.make("desk-ack"),
+        targetText: "Desk ACK fixture",
+        sessionStatus: "running",
+      });
+      const activeTurnId = "desk-ack-turn" as TurnId;
+      const snapshot = withSecondThread({
+        ...base,
+        threads: base.threads.map((thread) => ({
+          ...thread,
+          latestTurn: {
+            turnId: activeTurnId,
+            state: "running" as const,
+            requestedAt: isoAt(1000),
+            startedAt: isoAt(1001),
+            completedAt: null,
+            assistantMessageId: null,
+          },
+          session: { ...thread.session!, status: "running" as const, activeTurnId },
+        })),
+      });
+      let release!: (value: { sequence: number }) => void;
+      const pending = new Promise<{ sequence: number }>((resolve) => {
+        release = resolve;
+      });
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot,
+        configureFixture: (next) => {
+          next.serverConfig = {
+            ...next.serverConfig,
+            keybindings: [
+              {
+                command: "composer.steer",
+                shortcut: {
+                  key: "enter",
+                  modKey: false,
+                  ctrlKey: true,
+                  metaKey: false,
+                  altKey: false,
+                  shiftKey: false,
+                },
+              },
+            ],
+            providers: next.serverConfig.providers.map((provider) => ({
+              ...provider,
+              runtimeCapabilities: { liveSteer: "supported", threadGoals: "unsupported" },
+            })),
+          };
+        },
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? body.type === "thread.turn.steer"
+              ? pending
+              : { sequence: 2 }
+            : undefined,
+      });
+      const steers = () => wsRequests.filter((request) => request.type === "thread.turn.steer");
+      try {
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Older steer A");
+        await waitForLayout();
+        const oldEditor = await waitForComposerEditor();
+        oldEditor.focus();
+        await userEvent.keyboard("{Control>}{Enter}{/Control}");
+        await vi.waitFor(() => expect(steers()).toHaveLength(1));
+        useDeskStore.getState().dispatch({ type: "open", target: secondTarget });
+        await vi.waitFor(() => expect(oldEditor.isConnected).toBe(false));
+        useDeskStore.getState().dispatch({ type: "select", tabKey: firstKey });
+        await vi.waitFor(() =>
+          expect(document.querySelector('[data-testid="composer-editor"]')).not.toBe(oldEditor),
+        );
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Newer draft B");
+        await waitForLayout();
+        (await waitForComposerEditor()).focus();
+        await userEvent.keyboard("{Control>}{Enter}{/Control}");
+        expect(steers()).toHaveLength(1);
+        release({ sequence: 2 });
+        await waitForLayout();
+        await vi.waitFor(() =>
+          expect(useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.prompt).toBe(
+            "Newer draft B",
+          ),
+        );
+        expect(steers()).toHaveLength(1);
+      } finally {
+        release({ sequence: 2 });
+        await mounted.cleanup();
+      }
+    });
+
+    it("dispatches a saved follow-up only once with two real chat panes mounted", async () => {
+      const snapshot = withSecondThread(
+        createSnapshotForTargetUser({
+          targetMessageId: MessageId.make("desk-queue"),
+          targetText: "Desk queue fixture",
+        }),
+      );
+      let release!: (value: { sequence: number }) => void;
+      const pending = new Promise<{ sequence: number }>((resolve) => {
+        release = resolve;
+      });
+      await seedDeskQueue();
+      const mounted = await mountChatView({
+        viewport: { ...DEFAULT_VIEWPORT, width: 1800 },
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? body.type === "thread.turn.start"
+              ? pending
+              : { sequence: 2 }
+            : undefined,
+      });
+      try {
+        await vi.waitFor(() =>
+          expect(document.querySelectorAll('[data-testid="composer-editor"]')).toHaveLength(2),
+        );
+        await vi.waitFor(
+          () =>
+            expect(
+              wsRequests.filter((request) => request.type === "thread.turn.start"),
+            ).toHaveLength(1),
+          { timeout: 8000 },
+        );
+        useDeskStore.getState().dispatch({ type: "close", tabKey: firstKey });
+        await waitForLayout();
+        useDeskStore.getState().dispatch({ type: "open", target: firstTarget });
+        useComposerDraftStore.getState().setPrompt(THREAD_REF, "Do not race pending queue");
+        await waitForLayout();
+        document.querySelector<HTMLButtonElement>('button[aria-label="Send message"]')?.click();
+        await waitForLayout();
+        expect(wsRequests.filter((request) => request.type === "thread.turn.start")).toHaveLength(
+          1,
+        );
+      } finally {
+        release({ sequence: 2 });
+        await mounted.cleanup();
+      }
+    });
+
+    it("keeps queued input unclaimed when Stop arrives during deferred preparation", async () => {
+      const snapshot = withSecondThread(
+        createSnapshotForTargetUser({
+          targetMessageId: MessageId.make("desk-stop"),
+          targetText: "Desk Stop fixture",
+          runtimeMode: "full-access",
+        }),
+      );
+      const queue = await seedDeskQueue("approval-required");
+      let release!: (value: { sequence: number }) => void;
+      const pending = new Promise<{ sequence: number }>((resolve) => {
+        release = resolve;
+      });
+      const mounted = await mountChatView({
+        viewport: { ...DEFAULT_VIEWPORT, width: 1800 },
+        snapshot,
+        resolveRpc: (body) =>
+          body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+            ? body.type === "thread.runtime-mode.set"
+              ? pending
+              : { sequence: 2 }
+            : undefined,
+      });
+      try {
+        await vi.waitFor(() =>
+          expect(wsRequests.some((request) => request.type === "thread.runtime-mode.set")).toBe(
+            true,
+          ),
+        );
+        // A provider projection can catch up during settings preparation.
+        // Exercise the genuine Stop control once that active turn is visible,
+        // while the older queued-start continuation is still awaiting its ACK.
+        const thread = fixture.snapshot.threads[0]!;
+        const turnId = "desk-stop-live-turn" as TurnId;
+        rpcHarness.emitStreamValue(ORCHESTRATION_WS_METHODS.subscribeThread, {
+          kind: "snapshot",
+          snapshot: {
+            snapshotSequence: 20,
+            thread: {
+              ...thread,
+              latestTurn: {
+                turnId,
+                state: "running",
+                requestedAt: isoAt(2000),
+                startedAt: isoAt(2001),
+                completedAt: null,
+                assistantMessageId: null,
+              },
+              session: {
+                ...thread.session!,
+                status: "running",
+                activeTurnId: turnId,
+                updatedAt: isoAt(2001),
+              },
+            },
+          },
+        });
+        const stop = await waitForElement(
+          () =>
+            document.querySelector<HTMLButtonElement>(
+              '[aria-label="Main chat group"] button[aria-label="Stop generation"]',
+            ),
+          "Queued preparation must expose Stop",
+        );
+        stop.click();
+        await vi.waitFor(() =>
+          expect(wsRequests.some((request) => request.type === "thread.turn.interrupt")).toBe(true),
+        );
+        release({ sequence: 2 });
+        await vi.waitFor(() =>
+          expect(document.body.textContent).toContain("Stopped before sending"),
+        );
+        expect(wsRequests.some((request) => request.type === "thread.turn.start")).toBe(false);
+        const persisted = queue.load(LOCAL_ENVIRONMENT_ID);
+        expect(persisted.ok).toBe(true);
+        if (persisted.ok) {
+          expect(persisted.value.pending).toHaveLength(1);
+          expect(persisted.value.pending[0]?.blockedReason).not.toBeNull();
+          expect(persisted.value.claimed).toHaveLength(0);
+        }
+      } finally {
+        release({ sequence: 2 });
+        await mounted.cleanup();
+      }
+    });
+
+    it("pins the original context and task rail independently in each real pane", async () => {
+      const mounted = await mountChatView({
+        viewport: { ...DEFAULT_VIEWPORT, width: 2100 },
+        snapshot: withSecondThread(
+          createSnapshotWithRuntimeTaskProgress({ withContextWindow: true }),
+        ),
+      });
+      try {
+        await splitChats();
+        const group = () => document.querySelector<HTMLElement>('[aria-label="Main chat group"]')!;
+        const trigger = group().querySelector<HTMLButtonElement>(
+          'button[aria-label^="Task progress:"]',
+        );
+        expect(trigger).not.toBeNull();
+        trigger!.click();
+        await page.getByRole("button", { name: "Show on the side" }).click();
+        await vi.waitFor(() =>
+          expect(group().querySelector('[data-session-rail="true"]')).not.toBeNull(),
+        );
+        expect(useUiStateStore.getState().sessionRailDocked).toBe(false);
+        expect(useDeskStore.getState().desk.groups.g1?.sessionRailDocked).toBe(true);
+        expect(document.querySelectorAll('button[aria-label^="Context window"]')).toHaveLength(1);
+        await page.getByRole("button", { name: "Show in composer" }).click();
+        await vi.waitFor(() =>
+          expect(document.querySelectorAll('button[aria-label^="Context window"]')).toHaveLength(2),
+        );
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+  }
+
   if (chatViewBrowserPart === "navigation") {
+    it("matches Projects row styling and idle timestamps in Desk without moving the title on hover", async () => {
+      const longTitle =
+        "A long chat title that must truncate before its timestamp and hover actions";
+      const snapshot = createSnapshotForTargetUser({
+        targetMessageId: "msg-user-desk-project-row-parity" as MessageId,
+        targetText: "compare sidebar row presentation",
+      });
+      const mounted = await mountChatView({
+        viewport: DEFAULT_VIEWPORT,
+        snapshot: {
+          ...snapshot,
+          threads: snapshot.threads.map((thread) =>
+            thread.id === THREAD_ID ? Object.assign({}, thread, { title: longTitle }) : thread,
+          ),
+        },
+      });
+      try {
+        const projectsRow = page.getByTestId(`thread-row-${THREAD_ID}`);
+        await expect.element(projectsRow).toBeVisible();
+        await page.getByTestId("composer-editor").hover();
+        // Compare the live production components, not a duplicate reference
+        // fixture that could silently drift from the actual Projects design.
+        const projectPresentation = readSidebarRowPresentation(projectsRow.element());
+        const projectTimestamp =
+          projectsRow.element().lastElementChild!.lastElementChild!.textContent;
+        await projectsRow.hover();
+        const projectHoverPresentation = readSidebarRowPresentation(projectsRow.element());
+        await page
+          .getByRole("group", { name: "Sidebar view" })
+          .getByRole("button", { name: "Desk", exact: true })
+          .click();
+        const deskRow = page
+          .getByRole("region", { name: "Desk open chats" })
+          .getByRole("button", { name: longTitle, exact: true });
+        await expect.element(deskRow).toBeVisible();
+        await page.getByTestId("composer-editor").hover();
+        const row = deskRow.element();
+        const title = row.querySelector("[data-desk-row-title]")!;
+        const timestamp = row.querySelector("[data-desk-row-meta]")!;
+        const actions = row.closest("li")!.querySelector("[data-desk-row-actions]")!;
+        expect(readSidebarRowPresentation(row)).toEqual(projectPresentation);
+        expect(timestamp.textContent).toBe(projectTimestamp);
+        expect(timestamp.textContent).not.toBe("");
+        await vi.waitFor(() => {
+          expect(getComputedStyle(timestamp).opacity).toBe("1");
+          expect(getComputedStyle(actions).opacity).toBe("0");
+        });
+        const idleTitleWidth = title.getBoundingClientRect().width;
+        expect(title.scrollWidth).toBeGreaterThan(title.clientWidth);
+        await deskRow.hover();
+        await vi.waitFor(() => {
+          expect(getComputedStyle(timestamp).opacity).toBe("0");
+          expect(getComputedStyle(actions).opacity).toBe("1");
+        });
+        expect(title.getBoundingClientRect().width).toBe(idleTitleWidth);
+        const rename = actions.querySelector('button[aria-label^="Rename "]')!;
+        const close = actions.querySelector('button[aria-label^="Close tab "]')!;
+        const renameBounds = rename.getBoundingClientRect();
+        const closeBounds = close.getBoundingClientRect();
+        expect(closeBounds.left - renameBounds.right).toBeGreaterThanOrEqual(0);
+        expect(closeBounds.left - renameBounds.right).toBeLessThanOrEqual(5);
+        expect(row.getBoundingClientRect().right - closeBounds.right).toBeGreaterThanOrEqual(0);
+        expect(row.getBoundingClientRect().right - closeBounds.right).toBeLessThanOrEqual(5);
+        expect(title.getBoundingClientRect().right).toBeLessThanOrEqual(renameBounds.left + 1);
+        await page
+          .getByRole("region", { name: "Desk open chats" })
+          .getByRole("button", { name: `Rename ${longTitle}`, exact: true })
+          .hover();
+        // The actions are siblings of the native activation button so controls
+        // aren't nested. Their parent hover must still cover the whole row.
+        expect(readSidebarRowPresentation(row)).toEqual(projectHoverPresentation);
+      } finally {
+        await mounted.cleanup();
+      }
+    });
+
     it("replaces an open subagent detail with Atrium and does not restore it on close", async () => {
       const mounted = await mountChatView({
         viewport: DEFAULT_VIEWPORT,
@@ -6413,6 +6879,117 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
       }
     });
 
+    it.each([
+      { viewport: DEFAULT_VIEWPORT, confirmation: false },
+      { viewport: DEFAULT_VIEWPORT, confirmation: true },
+      { viewport: COMPACT_FOOTER_VIEWPORT, confirmation: false },
+      { viewport: COMPACT_FOOTER_VIEWPORT, confirmation: true },
+    ])(
+      "keeps sidebar rename/archive actions adjacent and right-aligned ($viewport.name, confirmation setting=$confirmation)",
+      async ({ viewport, confirmation }) => {
+        const longTitle = "A long project chat title that must truncate before the row actions";
+        const snapshot = createSnapshotForTargetUser({
+          targetMessageId: "msg-user-sidebar-action-layout" as MessageId,
+          targetText: "sidebar row action layout",
+        });
+        const mounted = await mountChatView({
+          viewport,
+          snapshot: {
+            ...snapshot,
+            threads: snapshot.threads.map((thread) =>
+              thread.id === THREAD_ID ? Object.assign({}, thread, { title: longTitle }) : thread,
+            ),
+          },
+          configureFixture: (nextFixture) => {
+            nextFixture.serverConfig = {
+              ...nextFixture.serverConfig,
+              clientSettings: {
+                ...nextFixture.serverConfig.clientSettings,
+                confirmThreadArchive: confirmation,
+              },
+            };
+          },
+          resolveRpc: (body) =>
+            body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand ? { sequence: 2 } : undefined,
+        });
+
+        try {
+          // The sidebar shell can arrive ahead of this selected chat's details;
+          // archive uses the existing canonical thread action, not shell data.
+          await vi.waitFor(() =>
+            expect(selectThreadByRef(useStore.getState(), THREAD_REF)).toBeDefined(),
+          );
+          const mobile = viewport.width < 768;
+          if (mobile) {
+            const toggle = await waitForElement(
+              () => document.querySelector<HTMLButtonElement>('[data-slot="sidebar-trigger"]'),
+              "Unable to find the mobile sidebar toggle.",
+            );
+            toggle.click();
+          }
+          const row = page.getByTestId(`thread-row-${THREAD_ID}`);
+          const title = page.getByTestId(`thread-title-${THREAD_ID}`);
+          const rename = row.getByRole("button", { name: `Rename ${longTitle}`, exact: true });
+          const archive = page.getByTestId(`thread-archive-${THREAD_ID}`);
+          await expect.element(row).toBeVisible();
+          await row.hover();
+          // Read real production layout after hover/Sheet transitions. Checking
+          // DOM adjacency alone would miss the former absolute-positioned gap.
+          await vi.waitFor(() => {
+            const rowBounds = row.element().getBoundingClientRect();
+            const titleBounds = title.element().getBoundingClientRect();
+            const renameBounds = rename.element().getBoundingClientRect();
+            const archiveBounds = archive.element().getBoundingClientRect();
+            const actionCluster = archive.element().closest('[class~="transition-opacity"]');
+            expect(actionCluster).not.toBeNull();
+            expect(getComputedStyle(actionCluster!).opacity).toBe("1");
+            expect(archiveBounds.left - renameBounds.right).toBeGreaterThanOrEqual(0);
+            expect(archiveBounds.left - renameBounds.right).toBeLessThanOrEqual(5);
+            expect(rowBounds.right - archiveBounds.right).toBeGreaterThanOrEqual(0);
+            expect(rowBounds.right - archiveBounds.right).toBeLessThanOrEqual(5);
+            expect(Math.abs(renameBounds.top - archiveBounds.top)).toBeLessThanOrEqual(1);
+            expect(titleBounds.right).toBeLessThanOrEqual(renameBounds.left + 1);
+            expect(renameBounds.width).toBe(mobile ? 32 : 20);
+            expect(archiveBounds.width).toBe(mobile ? 32 : 20);
+          });
+          expect(title.element().scrollWidth).toBeGreaterThan(title.element().clientWidth);
+
+          await archive.click();
+          // Mobile's existing anti-mistap policy always requires confirmation,
+          // even when the user's desktop archive preference is immediate.
+          if (confirmation || mobile) {
+            const confirm = page.getByTestId(`thread-archive-confirm-${THREAD_ID}`);
+            await expect.element(confirm).toBeVisible();
+            await expect.element(rename).not.toBeInTheDocument();
+            await expect.element(archive).not.toBeInTheDocument();
+            const bounds = confirm.element().getBoundingClientRect();
+            expect(title.element().getBoundingClientRect().right).toBeLessThanOrEqual(
+              bounds.left + 1,
+            );
+            expect(row.element().getBoundingClientRect().right - bounds.right).toBeLessThanOrEqual(
+              5,
+            );
+            expect(wsRequests.some((request) => request.type === "thread.archive")).toBe(false);
+            await confirm.click();
+          }
+          // Shared placement must preserve both archive policies and must not
+          // dispatch a rename or duplicate the archive when a button bubbles.
+          await vi.waitFor(() =>
+            expect(
+              wsRequests.filter(
+                (request) =>
+                  request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                  request.type === "thread.archive",
+              ),
+            ).toHaveLength(1),
+          );
+          expect(wsRequests.some((request) => request.type === "thread.meta.update")).toBe(false);
+        } finally {
+          await mounted.cleanup();
+        }
+      },
+    );
+
     it("hides the archive action when the pointer leaves a thread row", async () => {
       const mounted = await mountChatView({
         viewport: DEFAULT_VIEWPORT,
@@ -6433,7 +7010,9 @@ describe(`ChatView full app (${chatViewBrowserPart})`, () => {
             ),
           "Unable to find archive button.",
         );
-        const archiveAction = archiveButton.parentElement;
+        // The optional tooltip wrapper is deliberately separate from the
+        // shared action cluster; opacity is applied to that common ancestor.
+        const archiveAction = archiveButton.closest('[class~="transition-opacity"]');
         expect(
           archiveAction,
           "Archive button should render inside a visibility wrapper.",

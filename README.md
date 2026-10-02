@@ -49,6 +49,8 @@ This is the practical working list. It will probably get cleaned up later.
 - Removed hosted web-app assumptions and focused the project on the Electron app.
 - Disabled update checks until Cafe Code has its own release path.
 - Added a queue/follow-up workflow for prompts sent while a provider is running.
+- Added a [Desk working set with compact chat tab groups](docs/desk-tabs.md),
+  keeping the project catalog and existing chat controls intact.
 - Added provider-aware queue actions: steer when supported, interrupt when that
   is the honest behavior.
 - Added thread moving between project folders and working directories.

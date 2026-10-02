@@ -17,6 +17,7 @@ import type {
 } from "@cafecode/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import { normalizeCodexAccountPlanPayload } from "effect-codex-app-server/compatibility";
 import * as CodexSchema from "effect-codex-app-server/schema";
 
 const decodeRateLimitsUpdatedNotification = Schema.decodeUnknownOption(
@@ -65,6 +66,9 @@ function mapRateLimitSnapshot(
   return {
     ...(snapshot.limitId !== undefined ? { limitId: snapshot.limitId } : {}),
     ...(snapshot.limitName !== undefined ? { limitName: snapshot.limitName } : {}),
+    ...(snapshot.normalModelSlug !== undefined
+      ? { normalModelSlug: snapshot.normalModelSlug }
+      : {}),
     ...(snapshot.planType !== undefined ? { planType: snapshot.planType } : {}),
     ...(snapshot.rateLimitReachedType !== undefined
       ? { rateLimitReachedType: snapshot.rateLimitReachedType }
@@ -172,7 +176,9 @@ function mapRollingCredits(
  * retaining nulls here would incorrectly erase metadata from the latest full read.
  */
 export function parseCodexRateLimitUpdate(raw: unknown): CodexRateLimitSnapshotUpdate | null {
-  const decoded = decodeRateLimitsUpdatedNotification(raw);
+  const decoded = decodeRateLimitsUpdatedNotification(
+    normalizeCodexAccountPlanPayload("account/rateLimits/updated", raw),
+  );
   if (Option.isNone(decoded)) return null;
 
   const update = decoded.value.rateLimits;
@@ -182,6 +188,7 @@ export function parseCodexRateLimitUpdate(raw: unknown): CodexRateLimitSnapshotU
   const snapshot: ServerProviderAccountRateLimitSnapshot = {
     limitId,
     ...(update.limitName ? { limitName: update.limitName } : {}),
+    ...(update.normalModelSlug ? { normalModelSlug: update.normalModelSlug } : {}),
     ...(update.planType ? { planType: update.planType } : {}),
     ...(update.rateLimitReachedType ? { rateLimitReachedType: update.rateLimitReachedType } : {}),
     ...(typeof update.spendControlReached === "boolean"

@@ -253,6 +253,18 @@ function readTrimmedMetadata(value: unknown): string | undefined {
   return trimmed.length > 0 && trimmed.length <= 256 ? trimmed : undefined;
 }
 
+/** Full usage reads can explicitly report unavailable alias metadata. Keep
+ * null distinct from omission, unlike the sparse app-server update mapper. */
+function readNullableMetadata(value: unknown): string | null | undefined {
+  return value === null ? null : readTrimmedMetadata(value);
+}
+
+function readUsageField(record: Record<string, unknown>, snakeCase: string, camelCase: string) {
+  // Null is a provider-reported value, not a reason to fall through to a stale
+  // spelling of the same field in a mixed-version response.
+  return record[snakeCase] !== undefined ? record[snakeCase] : record[camelCase];
+}
+
 function readFiniteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
@@ -377,6 +389,7 @@ function mapRawRateLimitWindow(value: unknown): ServerProviderAccountRateLimitWi
 }
 
 function mapRawCredits(value: unknown): ServerProviderAccountRateLimitSnapshot["credits"] {
+  if (value === null) return null;
   const record = readRecord(value);
   if (!record) return undefined;
   const hasCredits = record.has_credits ?? record.hasCredits;
@@ -399,16 +412,32 @@ function mapRawSpendControlLimit(
   const record = readRecord(value);
   if (!record) return undefined;
   const limit = readTrimmedMetadata(record.limit);
-  const remainingPercent = readFiniteNumber(record.remaining_percent ?? record.remainingPercent);
-  const resetsAt = readNonNegativeInteger(record.resets_at ?? record.resetsAt);
+  const remainingPercent = readFiniteNumber(
+    readUsageField(record, "remaining_percent", "remainingPercent"),
+  );
+  // WHAM uses reset_at; app-server snapshots and older Cafe-compatible usage
+  // responses use resets_at/resetsAt. An explicit null or invalid native field
+  // must not silently fall back to a contradictory legacy reset timestamp.
+  const resetsAt = readNonNegativeInteger(
+    record.reset_at !== undefined
+      ? record.reset_at
+      : readUsageField(record, "resets_at", "resetsAt"),
+  );
   const used = readTrimmedMetadata(record.used);
-  if (!limit || remainingPercent === undefined || resetsAt === undefined || !used) {
+  if (
+    !limit ||
+    remainingPercent === undefined ||
+    resetsAt === undefined ||
+    !Number.isSafeInteger(resetsAt) ||
+    !used
+  ) {
     return undefined;
   }
   return { limit, remainingPercent, resetsAt, used };
 }
 
-function mapRawRateLimitReachedType(value: unknown): string | undefined {
+function mapRawRateLimitReachedType(value: unknown): string | null | undefined {
+  if (value === null) return null;
   const direct = readTrimmedMetadata(value);
   if (direct) return direct;
   const record = readRecord(value);
@@ -480,8 +509,10 @@ function mapRawRateLimitSnapshot(input: {
   readonly limitName?: string | undefined;
   readonly rateLimit: unknown;
   readonly credits?: unknown;
+  readonly normalModelSlug?: unknown;
   readonly planType?: string | undefined;
-  readonly rateLimitReachedType?: string | undefined;
+  readonly rateLimitReachedType?: string | null | undefined;
+  readonly spendControl?: unknown;
   readonly spendControlReached?: unknown;
   readonly individualLimit?: unknown;
 }): ServerProviderAccountRateLimitSnapshot {
@@ -489,24 +520,49 @@ function mapRawRateLimitSnapshot(input: {
   const primary = mapRawRateLimitWindow(rateLimit?.primary_window ?? rateLimit?.primary);
   const secondary = mapRawRateLimitWindow(rateLimit?.secondary_window ?? rateLimit?.secondary);
   const credits = mapRawCredits(input.credits);
+  const normalModelSlug = readNullableMetadata(input.normalModelSlug);
+  // Codex rust-v0.159.0 (687a119f), backend-client/src/client.rs,
+  // make_rate_limit_snapshot/map_individual_limit read WHAM's nested
+  // spend_control.{reached,individual_limit}, not the flattened app-server
+  // spelling. Prefer that authoritative container whenever it is present,
+  // including null/malformed values; otherwise retain older flattened usage
+  // responses. Every input here belongs to this exact bucket, never its parent.
+  const spendControl = readRecord(input.spendControl);
   const rawSpendControlReached =
-    input.spendControlReached ?? rateLimit?.spend_control_reached ?? rateLimit?.spendControlReached;
+    input.spendControl === null
+      ? null
+      : input.spendControl !== undefined
+        ? spendControl?.reached
+        : input.spendControlReached !== undefined
+          ? input.spendControlReached
+          : rateLimit && readUsageField(rateLimit, "spend_control_reached", "spendControlReached");
   const spendControlReached =
-    typeof rawSpendControlReached === "boolean" ? rawSpendControlReached : undefined;
+    rawSpendControlReached === null || typeof rawSpendControlReached === "boolean"
+      ? rawSpendControlReached
+      : undefined;
   const individualLimit = mapRawSpendControlLimit(
-    input.individualLimit ?? rateLimit?.individual_limit ?? rateLimit?.individualLimit,
+    input.spendControl === null
+      ? null
+      : input.spendControl !== undefined
+        ? spendControl && readUsageField(spendControl, "individual_limit", "individualLimit")
+        : input.individualLimit !== undefined
+          ? input.individualLimit
+          : rateLimit && readUsageField(rateLimit, "individual_limit", "individualLimit"),
   );
 
   return {
     limitId: input.limitId,
     ...(input.limitName ? { limitName: input.limitName } : {}),
+    ...(normalModelSlug !== undefined ? { normalModelSlug } : {}),
     ...(input.planType ? { planType: input.planType } : {}),
-    ...(input.rateLimitReachedType ? { rateLimitReachedType: input.rateLimitReachedType } : {}),
+    ...(input.rateLimitReachedType !== undefined
+      ? { rateLimitReachedType: input.rateLimitReachedType }
+      : {}),
     ...(spendControlReached !== undefined ? { spendControlReached } : {}),
     ...(individualLimit !== undefined ? { individualLimit } : {}),
     ...(primary ? { primary } : {}),
     ...(secondary ? { secondary } : {}),
-    ...(credits ? { credits } : {}),
+    ...(credits !== undefined ? { credits } : {}),
   };
 }
 
@@ -519,7 +575,7 @@ function parseCodexAccountRateLimitsPayload(
 
   const planType = readTrimmedMetadata(record.plan_type ?? record.planType);
   const rateLimitReachedType = mapRawRateLimitReachedType(
-    record.rate_limit_reached_type ?? record.rateLimitReachedType,
+    readUsageField(record, "rate_limit_reached_type", "rateLimitReachedType"),
   );
   const rateLimitResetCredits = mapRawRateLimitResetCredits(
     record.rate_limit_reset_credits ?? record.rateLimitResetCredits,
@@ -528,10 +584,12 @@ function parseCodexAccountRateLimitsPayload(
     limitId: "codex",
     rateLimit: record.rate_limit ?? record.rateLimit,
     credits: record.credits,
-    spendControlReached: record.spend_control_reached ?? record.spendControlReached,
-    individualLimit: record.individual_limit ?? record.individualLimit,
+    normalModelSlug: readUsageField(record, "normal_model_slug", "normalModelSlug"),
+    spendControl: readUsageField(record, "spend_control", "spendControl"),
+    spendControlReached: readUsageField(record, "spend_control_reached", "spendControlReached"),
+    individualLimit: readUsageField(record, "individual_limit", "individualLimit"),
     ...(planType ? { planType } : {}),
-    ...(rateLimitReachedType ? { rateLimitReachedType } : {}),
+    ...(rateLimitReachedType !== undefined ? { rateLimitReachedType } : {}),
   });
   const rateLimitsByLimitId: Record<string, ServerProviderAccountRateLimitSnapshot> = {
     codex: primarySnapshot,
@@ -547,13 +605,35 @@ function parseCodexAccountRateLimitsPayload(
       if (!additional || !limitId) {
         continue;
       }
-      rateLimitsByLimitId[limitId] = mapRawRateLimitSnapshot({
+      const additionalSnapshot = mapRawRateLimitSnapshot({
         limitId,
         limitName: readTrimmedMetadata(additional.limit_name ?? additional.limitName),
         rateLimit: additional.rate_limit ?? additional.rateLimit,
-        spendControlReached: additional.spend_control_reached ?? additional.spendControlReached,
-        individualLimit: additional.individual_limit ?? additional.individualLimit,
+        normalModelSlug: readUsageField(additional, "normal_model_slug", "normalModelSlug"),
+        // Additional quotas are independent buckets. Only carry credits and
+        // reached reasons explicitly present on this bucket; a main-account
+        // balance or exhausted state is not evidence about an alias quota.
+        credits: additional.credits,
+        rateLimitReachedType: mapRawRateLimitReachedType(
+          readUsageField(additional, "rate_limit_reached_type", "rateLimitReachedType"),
+        ),
+        spendControl: readUsageField(additional, "spend_control", "spendControl"),
+        spendControlReached: readUsageField(
+          additional,
+          "spend_control_reached",
+          "spendControlReached",
+        ),
+        individualLimit: readUsageField(additional, "individual_limit", "individualLimit"),
         ...(planType ? { planType } : {}),
+      });
+      // Provider-supplied quota names are inert record keys. Define an own
+      // property so a literal __proto__ bucket cannot invoke a prototype setter
+      // and silently turn its metadata into inherited account fields.
+      Object.defineProperty(rateLimitsByLimitId, limitId, {
+        value: additionalSnapshot,
+        enumerable: true,
+        writable: true,
+        configurable: true,
       });
     }
   }
@@ -750,6 +830,24 @@ const ASTRA_CODEX_MODEL: ServerProviderModel = {
     supportsFastMode: true,
   }),
 };
+// Native Codex 0.159.1 advertises Low through Ultra with Low as its default:
+// https://github.com/openai/codex/blob/8e68a98ef03cdde76d2e6800791ebdf1b3b95b24/codex-rs/models-manager/models.json
+// These are Codex controls, not the separate API model's effort defaults or
+// context maximum. Live discovery remains authoritative (including Bedrock's
+// narrower controls); adding this fallback does not replace Cafe's Astra default.
+const SOL_61_CODEX_MODEL: ServerProviderModel = {
+  slug: "gpt-6.1-sol",
+  name: "GPT-6.1-Sol",
+  isCustom: false,
+  capabilities: {
+    ...makeStaticCodexReasoningCapabilities({
+      defaultEffort: "low",
+      supportedEfforts: CODEX_ULTRA_REASONING_EFFORTS,
+      supportsFastMode: true,
+    }),
+    inputModalities: ["text", "image"],
+  },
+};
 // Codex's published model guide (verified 2026-09-23) lists Sol's CLI efforts
 // through Ultra with Medium as default, and Luna through Max only:
 // https://learn.chatgpt.com/docs/models
@@ -778,6 +876,7 @@ const LUNA_CODEX_MODEL: ServerProviderModel = {
 };
 const KNOWN_CUSTOM_CODEX_MODELS: ReadonlyMap<string, ServerProviderModel> = new Map([
   [ASTRA_CODEX_MODEL.slug, { ...ASTRA_CODEX_MODEL, isCustom: true }],
+  [SOL_61_CODEX_MODEL.slug, { ...SOL_61_CODEX_MODEL, isCustom: true }],
   [SOL_CODEX_MODEL.slug, { ...SOL_CODEX_MODEL, isCustom: true }],
   [LUNA_CODEX_MODEL.slug, { ...LUNA_CODEX_MODEL, isCustom: true }],
 ]);
@@ -787,6 +886,7 @@ const KNOWN_CUSTOM_CODEX_MODELS: ReadonlyMap<string, ServerProviderModel> = new 
 // models before the full app-server diagnostic path has ever populated cache.
 const STATIC_CODEX_MODELS: ReadonlyArray<ServerProviderModel> = [
   ASTRA_CODEX_MODEL,
+  SOL_61_CODEX_MODEL,
   SOL_CODEX_MODEL,
   LUNA_CODEX_MODEL,
   {

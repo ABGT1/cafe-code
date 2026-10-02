@@ -77,6 +77,11 @@ const BUNDLED_RATES: ReadonlyArray<readonly [prefix: string, rate: ModelRate]> =
   // Fast uses 2x applicable rates. Those request-level dimensions are absent
   // from the usage ledger, so this entry is explicitly the standard baseline.
   ["gpt-6-astra", { input: 10, cachedInput: 1, cacheWrite: 12.5, output: 50 }],
+  // Verified 2026-09-30: https://developers.openai.com/api/docs/models/gpt-6.1-sol
+  // Sol 6.1 cache reads are 5% of fresh input, rather than Sol 6's 10%.
+  // Keep its exact family separate from older Sol and the generic GPT fallback;
+  // service-tier and per-request long-context premiums remain excluded above.
+  ["gpt-6.1-sol", { input: 2, cachedInput: 0.1, cacheWrite: 2.5, output: 10 }],
   // Released 2026-09-22; https://developers.openai.com/api/docs/pricing.
   // Keep distinct prefixes so new Sol/Luna usage cannot inherit GPT-5 rates.
   ["gpt-6-sol", { input: 2, cachedInput: 0.2, cacheWrite: 2.5, output: 10 }],
