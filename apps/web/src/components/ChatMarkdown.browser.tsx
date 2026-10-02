@@ -817,41 +817,58 @@ describe("ChatMarkdown", () => {
   });
 
   it.each([
-    ["/Users/example/repo", "/Users/example/repo/../outside.md"],
-    ["/home/example/repo", "/home/example/repo/../outside.md"],
-    ["C:/repo/project", "C:/repo/project/../outside.md"],
-  ])("requires consent before opening or revealing traversal outside %s", async (cwd, filePath) => {
-    installDesktopCapabilityStub();
-    confirmMock.mockResolvedValueOnce(false);
-    showContextMenuMock.mockResolvedValueOnce("reveal");
-    const screen = await render(<ChatMarkdown text={`[Outside](${filePath})`} cwd={cwd} />);
-    try {
-      const link = page.getByRole("link", { name: "outside.md" });
-      await expect.element(link).toHaveAttribute("data-open-policy", "confirm");
-      await link.click();
-      await vi.waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(1));
-      expect(openInPreferredEditorMock).not.toHaveBeenCalled();
-
+    ["/Users/example/repo", "/Users/example/repo/../outside.md", null],
+    ["/home/example/repo", "/home/example/repo/../outside.md", null],
+    ["C:/repo/project", "C:/repo/project/../outside.md", "C:/repo/outside.md"],
+  ] as const)(
+    "requires consent before opening or revealing traversal outside %s",
+    async (cwd, filePath, normalizedTarget) => {
+      installDesktopCapabilityStub();
       confirmMock.mockResolvedValueOnce(false);
-      document
-        .querySelector(".chat-markdown-file-link")!
-        .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
-      await vi.waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(2));
-      expect(revealPathMock).not.toHaveBeenCalled();
-
-      await link.click();
-      await vi.waitFor(() =>
-        expect(openInPreferredEditorMock).toHaveBeenCalledWith(expect.anything(), filePath),
-      );
       showContextMenuMock.mockResolvedValueOnce("reveal");
-      document
-        .querySelector(".chat-markdown-file-link")!
-        .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
-      await vi.waitFor(() => expect(revealPathMock).toHaveBeenCalledWith(filePath));
-    } finally {
-      await screen.unmount();
-    }
-  });
+      const screen = await render(<ChatMarkdown text={`[Outside](${filePath})`} cwd={cwd} />);
+      try {
+        const link = page.getByRole("link", { name: "outside.md" });
+        await expect.element(link).toHaveAttribute("data-open-policy", "confirm");
+        const anchor = document.querySelector<HTMLAnchorElement>(".chat-markdown-file-link");
+        expect(anchor).not.toBeNull();
+        const actionPath = anchor!.getAttribute("href")!;
+        // Native Windows browser handling can canonicalize drive URL dot
+        // segments before delivering the link destination. Accept only that
+        // exact alternate spelling of this outside fixture; POSIX retains its
+        // source spelling because collapsing segments can change symlink
+        // traversal. Consent and both actions must agree on the rendered target.
+        const allowedTargets = normalizedTarget ? [filePath, normalizedTarget] : [filePath];
+        expect(allowedTargets).toContain(actionPath);
+        await link.click();
+        await vi.waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(1));
+        expect(confirmMock).toHaveBeenLastCalledWith(expect.stringContaining(actionPath));
+        expect(openInPreferredEditorMock).not.toHaveBeenCalled();
+
+        confirmMock.mockResolvedValueOnce(false);
+        anchor!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+        await vi.waitFor(() => expect(confirmMock).toHaveBeenCalledTimes(2));
+        expect(confirmMock).toHaveBeenLastCalledWith(expect.stringContaining(actionPath));
+        expect(revealPathMock).not.toHaveBeenCalled();
+
+        await link.click();
+        await vi.waitFor(() =>
+          expect(openInPreferredEditorMock).toHaveBeenCalledWith(expect.anything(), actionPath),
+        );
+        expect(openInPreferredEditorMock).toHaveBeenCalledTimes(1);
+        expect(confirmMock).toHaveBeenCalledTimes(3);
+        expect(confirmMock).toHaveBeenLastCalledWith(expect.stringContaining(actionPath));
+        showContextMenuMock.mockResolvedValueOnce("reveal");
+        anchor!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+        await vi.waitFor(() => expect(revealPathMock).toHaveBeenCalledWith(actionPath));
+        expect(revealPathMock).toHaveBeenCalledTimes(1);
+        expect(confirmMock).toHaveBeenCalledTimes(4);
+        expect(confirmMock).toHaveBeenLastCalledWith(expect.stringContaining(actionPath));
+      } finally {
+        await screen.unmount();
+      }
+    },
+  );
 
   it("copies markdown file paths instead of opening editors in pure browser sessions", async () => {
     const writeText = vi.fn(async () => undefined);
